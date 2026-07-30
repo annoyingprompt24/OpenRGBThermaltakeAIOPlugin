@@ -80,6 +80,13 @@ public:
     void                SetOverlayEnabled(bool enabled);
 
     /*-----------------------------------------------------*\
+    | Debug aid: draws "Frame i/N" on every sent frame, for   |
+    | pinpointing exactly which frame index(es) glitch on real |
+    | hardware when paired with a slowed-down Target FPS.       |
+    \*-----------------------------------------------------*/
+    void                SetDebugFrameIndexEnabled(bool enabled);
+
+    /*-----------------------------------------------------*\
     | Start/stop the continuous background send loop. The   |
     | panel reverts to its own default graphic soon after   |
     | Stop() -- there is no set-and-forget on this device.  |
@@ -106,6 +113,7 @@ private:
     QThread*            worker_thread;
     std::atomic<bool>   streaming;
     std::atomic<bool>   overlay_enabled;
+    std::atomic<bool>   debug_frame_index_enabled;
 
     QMutex              images_mutex;
     QVector<QImage>     images;

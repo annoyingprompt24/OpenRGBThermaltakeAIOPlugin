@@ -188,6 +188,11 @@ void ThermaltakeAIOTab::on_sensor_overlay_checkbox_toggled(bool checked)
     device->SetOverlayEnabled(checked);
 }
 
+void ThermaltakeAIOTab::on_debug_frame_index_checkbox_toggled(bool checked)
+{
+    device->SetDebugFrameIndexEnabled(checked);
+}
+
 void ThermaltakeAIOTab::on_fps_slider_valueChanged(int value)
 {
     device->SetTargetFps(value);

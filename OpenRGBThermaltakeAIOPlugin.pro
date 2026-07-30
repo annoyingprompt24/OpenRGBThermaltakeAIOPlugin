@@ -102,6 +102,13 @@ unix:!macx {
         }
     }
 
+    #---------------------------------------------------------------------------------------#
+    # libjpeg directly, so we can force 4:4:4 chroma subsampling -- Qt's own JPEG writer has   #
+    # no public API for this, and this exact panel requires it for streaming (4:2:0 causes    #
+    # corrupted garbage in part of the displayed frame).                                      #
+    #---------------------------------------------------------------------------------------#
+    LIBS += -ljpeg
+
     target.path = $$PREFIX/lib/openrgb/plugins/
     INSTALLS   += target
 }

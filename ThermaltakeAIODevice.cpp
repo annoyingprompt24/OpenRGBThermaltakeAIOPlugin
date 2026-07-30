@@ -11,16 +11,103 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
-#include <QBuffer>
+#include <csetjmp>
 #include <QPainter>
 #include <QFont>
 #include <QFontMetrics>
+
+extern "C" {
+#include <jpeglib.h>
+}
+
+namespace
+{
+    struct JpegErrorContext
+    {
+        struct jpeg_error_mgr pub;
+        jmp_buf setjmp_buffer;
+    };
+
+    void JpegErrorExit(j_common_ptr cinfo)
+    {
+        JpegErrorContext* err = reinterpret_cast<JpegErrorContext*>(cinfo->err);
+        std::longjmp(err->setjmp_buffer, 1);
+    }
+}
+
+/*-----------------------------------------------------------------------*\
+| Encodes with 4:4:4 chroma subsampling (no subsampling at all) instead  |
+| of Qt's default JPEG writer, which always produces 4:2:0 and has no    |
+| public API to change it. This specific panel requires 4:4:4 for the    |
+| continuous EP3 streaming path -- 4:2:0 causes corrupted garbage in      |
+| part of the displayed frame (documented independently by another         |
+| reverse-engineer of this exact device, 264A:233C -- boot/standby image    |
+| upload is a separate path that reportedly wants 4:2:0, opposite of        |
+| streaming, but we only use the streaming path here).                       |
+\*-----------------------------------------------------------------------*/
+static QByteArray EncodeJpeg444(const QImage& image, int quality)
+{
+    QImage rgb = image.convertToFormat(QImage::Format_RGB888);
+
+    struct jpeg_compress_struct cinfo;
+    JpegErrorContext jerr;
+    cinfo.err = jpeg_std_error(&jerr.pub);
+    jerr.pub.error_exit = JpegErrorExit;
+
+    unsigned char* out_buffer = nullptr;
+    unsigned long  out_size   = 0;
+
+    if(setjmp(jerr.setjmp_buffer))
+    {
+        jpeg_destroy_compress(&cinfo);
+        if(out_buffer != nullptr)
+        {
+            free(out_buffer);
+        }
+        return(QByteArray());
+    }
+
+    jpeg_create_compress(&cinfo);
+    jpeg_mem_dest(&cinfo, &out_buffer, &out_size);
+
+    cinfo.image_width      = rgb.width();
+    cinfo.image_height     = rgb.height();
+    cinfo.input_components = 3;
+    cinfo.in_color_space   = JCS_RGB;
+
+    jpeg_set_defaults(&cinfo);
+    jpeg_set_quality(&cinfo, quality, TRUE);
+
+    for(int c = 0; c < cinfo.num_components; c++)
+    {
+        cinfo.comp_info[c].h_samp_factor = 1;
+        cinfo.comp_info[c].v_samp_factor = 1;
+    }
+
+    jpeg_start_compress(&cinfo, TRUE);
+
+    while(cinfo.next_scanline < cinfo.image_height)
+    {
+        JSAMPROW row = const_cast<JSAMPROW>(rgb.constScanLine(cinfo.next_scanline));
+        jpeg_write_scanlines(&cinfo, &row, 1);
+    }
+
+    jpeg_finish_compress(&cinfo);
+
+    QByteArray result(reinterpret_cast<const char*>(out_buffer), static_cast<int>(out_size));
+
+    jpeg_destroy_compress(&cinfo);
+    free(out_buffer);
+
+    return(result);
+}
 
 ThermaltakeAIODevice::ThermaltakeAIODevice()
     : device(nullptr)
     , worker_thread(nullptr)
     , streaming(false)
     , overlay_enabled(false)
+    , debug_frame_index_enabled(false)
     , images_version(0)
     , render_version(0)
     , inter_chunk_delay_us(1000)
@@ -111,6 +198,12 @@ void ThermaltakeAIODevice::SetImages(const QVector<QImage>& new_images)
 void ThermaltakeAIODevice::SetOverlayEnabled(bool enabled)
 {
     overlay_enabled = enabled;
+    render_version++;
+}
+
+void ThermaltakeAIODevice::SetDebugFrameIndexEnabled(bool enabled)
+{
+    debug_frame_index_enabled = enabled;
     render_version++;
 }
 
@@ -311,11 +404,24 @@ void ThermaltakeAIODevice::RunLoop()
             {
                 DrawOverlay(&image, cached_readings);
             }
+            if(debug_frame_index_enabled.load())
+            {
+                QPainter painter(&image);
+                painter.setRenderHint(QPainter::Antialiasing);
+                QFont font = painter.font();
+                font.setPixelSize(image.height() / 10);
+                font.setBold(true);
+                painter.setFont(font);
+                QString text = QString("Frame %1/%2").arg(idx + 1).arg(local_images.size());
+                QRect bar(0, 0, image.width(), image.height() / 8);
+                painter.setPen(Qt::NoPen);
+                painter.setBrush(QColor(0, 0, 0, 180));
+                painter.drawRect(bar);
+                painter.setPen(Qt::yellow);
+                painter.drawText(bar, Qt::AlignCenter, text);
+            }
 
-            QByteArray jpeg_bytes;
-            QBuffer buffer(&jpeg_bytes);
-            buffer.open(QIODevice::WriteOnly);
-            image.save(&buffer, "JPEG", 90);
+            QByteArray jpeg_bytes = EncodeJpeg444(image, 90);
 
             encoded_cache[idx]         = jpeg_bytes;
             encoded_cache_version[idx] = current_render_version;

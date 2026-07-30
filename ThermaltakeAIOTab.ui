@@ -76,6 +76,16 @@
     </widget>
    </item>
    <item>
+    <widget class="QCheckBox" name="debug_frame_index_checkbox">
+     <property name="toolTip">
+      <string>Draws "Frame i/N" on every sent frame -- useful with a slowed-down Target FPS to pinpoint exactly which frame(s) glitch on hardware</string>
+     </property>
+     <property name="text">
+      <string>Debug: show frame index overlay</string>
+     </property>
+    </widget>
+   </item>
+   <item>
     <layout class="QHBoxLayout" name="fpsLayout">
      <item>
       <widget class="QLabel" name="fps_slider_label">

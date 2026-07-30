@@ -29,6 +29,7 @@ private slots:
     void on_background_color_button_clicked();
     void on_start_stop_button_clicked();
     void on_sensor_overlay_checkbox_toggled(bool checked);
+    void on_debug_frame_index_checkbox_toggled(bool checked);
     void on_fps_slider_valueChanged(int value);
     void RefreshConnectionStatus();
 
