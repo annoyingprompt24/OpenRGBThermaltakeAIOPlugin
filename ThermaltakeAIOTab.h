@@ -8,6 +8,7 @@
 #pragma once
 
 #include <QWidget>
+#include <QColor>
 #include "ThermaltakeAIODevice.h"
 
 namespace Ui
@@ -25,14 +26,19 @@ public:
 
 private slots:
     void on_choose_image_button_clicked();
+    void on_background_color_button_clicked();
     void on_start_stop_button_clicked();
     void on_sensor_overlay_checkbox_toggled(bool checked);
+    void on_fps_slider_valueChanged(int value);
     void RefreshConnectionStatus();
 
 private:
     Ui::ThermaltakeAIOTab* ui;
     ThermaltakeAIODevice*  device;
     QString                current_image_path;
+    QColor                 background_color;
 
+    void LoadAndStreamImage(const QString& path);
+    void UpdateBackgroundColorButtonSwatch();
     void UpdateStartStopButtonLabel();
 };

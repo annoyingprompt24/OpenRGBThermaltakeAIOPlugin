@@ -9,19 +9,28 @@
 #include "ui_ThermaltakeAIOTab.h"
 
 #include <QFileDialog>
+#include <QColorDialog>
 #include <QImage>
 #include <QImageReader>
+#include <QPainter>
 #include <QTimer>
 #include <QPixmap>
 
 ThermaltakeAIOTab::ThermaltakeAIOTab(QWidget* parent) :
     QWidget(parent),
-    ui(new Ui::ThermaltakeAIOTab)
+    ui(new Ui::ThermaltakeAIOTab),
+    background_color(Qt::black)
 {
     ui->setupUi(this);
 
     device = new ThermaltakeAIODevice();
 
+    /* Reflect whatever target fps the device actually started with (default, or env override). */
+    int initial_fps = device->GetTargetFps();
+    ui->fps_slider->setValue(initial_fps);
+    ui->fps_slider_label->setText(QString("Target FPS: %1").arg(initial_fps));
+
+    UpdateBackgroundColorButtonSwatch();
     RefreshConnectionStatus();
 
     /*-----------------------------------------------------*\
@@ -69,6 +78,29 @@ void ThermaltakeAIOTab::on_choose_image_button_clicked()
         return;
     }
 
+    LoadAndStreamImage(path);
+}
+
+void ThermaltakeAIOTab::on_background_color_button_clicked()
+{
+    QColor chosen = QColorDialog::getColor(background_color, this, "Background Color for Transparent Pixels");
+    if(!chosen.isValid())
+    {
+        return;
+    }
+
+    background_color = chosen;
+    UpdateBackgroundColorButtonSwatch();
+
+    /* Re-composite the already-loaded image against the new background, if any. */
+    if(!current_image_path.isEmpty())
+    {
+        LoadAndStreamImage(current_image_path);
+    }
+}
+
+void ThermaltakeAIOTab::LoadAndStreamImage(const QString& path)
+{
     /*-----------------------------------------------------*\
     | QImageReader::read() auto-advances to the next frame  |
     | on its own for animated formats like GIF -- no        |
@@ -77,9 +109,6 @@ void ThermaltakeAIOTab::on_choose_image_button_clicked()
     | which is why an earlier version of this only ever     |
     | captured frame 0). For a plain static image, read()   |
     | just returns one frame then a null image next call.   |
-    | Cropped/resized QImages are handed to the device as-  |
-    | is -- it re-encodes JPEG per send cycle so the sensor  |
-    | overlay (if enabled) can be redrawn with fresh values. |
     \*-----------------------------------------------------*/
     QImageReader reader(path);
     reader.setAutoTransform(true);
@@ -90,11 +119,26 @@ void ThermaltakeAIOTab::on_choose_image_button_clicked()
 
     while(!(image = reader.read()).isNull())
     {
-        int side = qMin(image.width(), image.height());
-        QRect crop_rect((image.width() - side) / 2, (image.height() - side) / 2, side, side);
-        QImage square = image.copy(crop_rect).scaled(ThermaltakeAIODevice::PANEL_SIZE, ThermaltakeAIODevice::PANEL_SIZE,
-                                                      Qt::IgnoreAspectRatio, Qt::SmoothTransformation)
-                                              .convertToFormat(QImage::Format_RGB32);
+        /*-------------------------------------------------*\
+        | Composite onto a solid background BEFORE cropping/ |
+        | scaling, not after -- the panel has no concept of   |
+        | transparency (it's a plain JPEG raster), and GIF     |
+        | encoders routinely leave undefined/garbage RGB data  |
+        | under fully-transparent pixels since it's never       |
+        | meant to be shown. Compositing first also avoids      |
+        | smooth-scaling blending that garbage color into        |
+        | semi-transparent edge pixels.                           |
+        \*-------------------------------------------------*/
+        QImage composited(image.size(), QImage::Format_RGB32);
+        composited.fill(background_color);
+        QPainter painter(&composited);
+        painter.drawImage(0, 0, image);
+        painter.end();
+
+        int side = qMin(composited.width(), composited.height());
+        QRect crop_rect((composited.width() - side) / 2, (composited.height() - side) / 2, side, side);
+        QImage square = composited.copy(crop_rect).scaled(ThermaltakeAIODevice::PANEL_SIZE, ThermaltakeAIODevice::PANEL_SIZE,
+                                                            Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
 
         if(first_frame.isNull())
         {
@@ -118,6 +162,13 @@ void ThermaltakeAIOTab::on_choose_image_button_clicked()
     ui->start_stop_button->setEnabled(device->IsConnected());
 }
 
+void ThermaltakeAIOTab::UpdateBackgroundColorButtonSwatch()
+{
+    QString text_color = (background_color.lightness() > 128) ? "black" : "white";
+    ui->background_color_button->setStyleSheet(
+        QString("background-color: %1; color: %2;").arg(background_color.name(), text_color));
+}
+
 void ThermaltakeAIOTab::on_start_stop_button_clicked()
 {
     if(device->IsStreaming())
@@ -135,6 +186,12 @@ void ThermaltakeAIOTab::on_start_stop_button_clicked()
 void ThermaltakeAIOTab::on_sensor_overlay_checkbox_toggled(bool checked)
 {
     device->SetOverlayEnabled(checked);
+}
+
+void ThermaltakeAIOTab::on_fps_slider_valueChanged(int value)
+{
+    device->SetTargetFps(value);
+    ui->fps_slider_label->setText(QString("Target FPS: %1").arg(value));
 }
 
 void ThermaltakeAIOTab::UpdateStartStopButtonLabel()

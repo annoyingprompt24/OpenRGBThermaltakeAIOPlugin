@@ -9,6 +9,8 @@
 #include <hidapi.h>
 #include <thread>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <QBuffer>
 #include <QPainter>
 #include <QFont>
@@ -19,9 +21,30 @@ ThermaltakeAIODevice::ThermaltakeAIODevice()
     , worker_thread(nullptr)
     , streaming(false)
     , overlay_enabled(false)
+    , images_version(0)
+    , render_version(0)
+    , inter_chunk_delay_us(5000)
+    , refresh_interval_ms(50)
+    , ack_pace(false)
 {
     /* Force an immediate sensor read on the first overlay-enabled frame. */
     cached_readings_time = std::chrono::steady_clock::now() - std::chrono::hours(1);
+
+    if(const char* env_delay = std::getenv("THERMALTAKE_AIO_CHUNK_DELAY_US"))
+    {
+        inter_chunk_delay_us = std::atoi(env_delay);
+    }
+    if(const char* env_refresh = std::getenv("THERMALTAKE_AIO_REFRESH_MS"))
+    {
+        refresh_interval_ms = std::atoi(env_refresh);
+    }
+    if(const char* env_ack = std::getenv("THERMALTAKE_AIO_ACK_PACE"))
+    {
+        ack_pace = (std::atoi(env_ack) != 0);
+    }
+
+    std::fprintf(stderr, "[ThermaltakeAIOPlugin] chunk delay = %dus, refresh interval = %dms, ack_pace = %s\n",
+                 inter_chunk_delay_us, refresh_interval_ms.load(), ack_pace ? "on" : "off");
 }
 
 ThermaltakeAIODevice::~ThermaltakeAIODevice()
@@ -81,11 +104,14 @@ void ThermaltakeAIODevice::SetImages(const QVector<QImage>& new_images)
 {
     QMutexLocker locker(&images_mutex);
     images = new_images;
+    images_version++;
+    render_version++;
 }
 
 void ThermaltakeAIODevice::SetOverlayEnabled(bool enabled)
 {
     overlay_enabled = enabled;
+    render_version++;
 }
 
 void ThermaltakeAIODevice::DrawOverlay(QImage* image, const ThermaltakeAIOSensorReadings& readings)
@@ -202,27 +228,67 @@ bool ThermaltakeAIODevice::IsStreaming() const
     return(streaming.load());
 }
 
+void ThermaltakeAIODevice::SetTargetFps(int fps)
+{
+    if(fps < 1)
+    {
+        fps = 1;
+    }
+    refresh_interval_ms = 1000 / fps;
+}
+
+int ThermaltakeAIODevice::GetTargetFps() const
+{
+    int ms = refresh_interval_ms.load();
+    return(ms > 0 ? 1000 / ms : 1000);
+}
+
 void ThermaltakeAIODevice::RunLoop()
 {
-    size_t frame_index = 0;
+    size_t   frame_index  = 0;
+    long     sent_frames  = 0;
+    long     encode_count = 0;
+    auto     loop_start   = std::chrono::steady_clock::now();
+
+    /*-----------------------------------------------------*\
+    | Only this thread touches these -- no mutex needed. Each  |
+    | slot's JPEG is (re-)encoded lazily, the cycle right      |
+    | before it's due to be sent, if its stamped version is    |
+    | behind the current render_version -- NOT all at once.    |
+    | A many-hundred-frame GIF used to re-encode every single   |
+    | frame synchronously on every overlay/sensor update,        |
+    | stalling the send loop for over a second at a time; this   |
+    | spreads that cost to ~one frame's encode time per cycle,    |
+    | regardless of total frame count.                              |
+    \*-----------------------------------------------------*/
+    QVector<QImage>     local_images;
+    QVector<QByteArray> encoded_cache;
+    QVector<int>        encoded_cache_version;
+    int                 synced_images_version = -1;
 
     while(streaming.load())
     {
-        QImage base_image;
+        auto cycle_start = std::chrono::steady_clock::now();
 
+        int current_images_version = images_version.load();
+        if(current_images_version != synced_images_version)
         {
             QMutexLocker locker(&images_mutex);
-            if(images.isEmpty())
-            {
-                locker.unlock();
-                std::this_thread::sleep_for(std::chrono::milliseconds(REFRESH_INTERVAL_MS));
-                continue;
-            }
-            base_image = images[frame_index % images.size()];
-            frame_index++;
+            local_images = images;
+            locker.unlock();
+
+            synced_images_version = current_images_version;
+            encoded_cache.clear();
+            encoded_cache.resize(local_images.size());
+            encoded_cache_version = QVector<int>(local_images.size(), -1);
+            frame_index = 0;
         }
 
-        auto cycle_start = std::chrono::steady_clock::now();
+        if(local_images.isEmpty())
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(refresh_interval_ms));
+            continue;
+        }
 
         if(overlay_enabled.load())
         {
@@ -230,17 +296,36 @@ void ThermaltakeAIODevice::RunLoop()
             {
                 cached_readings      = ThermaltakeAIOSensors::ReadAll();
                 cached_readings_time = cycle_start;
+                render_version++;
             }
-
-            DrawOverlay(&base_image, cached_readings);
         }
 
-        QByteArray jpeg_bytes;
-        QBuffer buffer(&jpeg_bytes);
-        buffer.open(QIODevice::WriteOnly);
-        base_image.save(&buffer, "JPEG", 90);
+        size_t idx = frame_index % local_images.size();
+        frame_index++;
+
+        int current_render_version = render_version.load();
+        if(encoded_cache_version[idx] != current_render_version)
+        {
+            QImage image = local_images[idx];
+            if(overlay_enabled.load())
+            {
+                DrawOverlay(&image, cached_readings);
+            }
+
+            QByteArray jpeg_bytes;
+            QBuffer buffer(&jpeg_bytes);
+            buffer.open(QIODevice::WriteOnly);
+            image.save(&buffer, "JPEG", 90);
+
+            encoded_cache[idx]         = jpeg_bytes;
+            encoded_cache_version[idx] = current_render_version;
+            encode_count++;
+        }
+
+        const QByteArray& jpeg_bytes = encoded_cache[idx];
 
         QVector<QByteArray> chunks = ChunkFrame(jpeg_bytes);
+        bool write_failed = false;
         for(const QByteArray& chunk : chunks)
         {
             if(!streaming.load())
@@ -248,15 +333,58 @@ void ThermaltakeAIODevice::RunLoop()
                 break;
             }
 
-            hid_write(device, reinterpret_cast<const unsigned char*>(chunk.constData()), chunk.size());
-            std::this_thread::sleep_for(std::chrono::milliseconds(INTER_CHUNK_DELAY_MS));
+            int result = hid_write(device, reinterpret_cast<const unsigned char*>(chunk.constData()), chunk.size());
+            if(result < 0)
+            {
+                std::fprintf(stderr, "[ThermaltakeAIOPlugin] hid_write failed after %ld frame(s) at "
+                             "%dus/chunk -- stopping stream (endpoint likely wedged, needs a physical replug)\n",
+                             sent_frames, inter_chunk_delay_us);
+                write_failed = true;
+                break;
+            }
+
+            if(inter_chunk_delay_us > 0)
+            {
+                std::this_thread::sleep_for(std::chrono::microseconds(inter_chunk_delay_us));
+            }
         }
 
-        auto elapsed = std::chrono::steady_clock::now() - cycle_start;
-        auto remaining = std::chrono::milliseconds(REFRESH_INTERVAL_MS) - elapsed;
-        if(remaining > std::chrono::milliseconds(0))
+        if(write_failed)
         {
-            std::this_thread::sleep_for(remaining);
+            streaming = false;
+            break;
+        }
+
+        sent_frames++;
+        if(sent_frames % 100 == 0)
+        {
+            double elapsed_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - loop_start).count();
+            std::fprintf(stderr, "[ThermaltakeAIOPlugin] %ld frames sent, %.1f fps average, %ld (re-)encodes so far\n",
+                         sent_frames, sent_frames / elapsed_s, encode_count);
+        }
+
+        if(ack_pace)
+        {
+            /*-------------------------------------------------*\
+            | Wait for the panel's own 16-byte EP4 reply (sent    |
+            | after each frame's commit chunk) instead of a        |
+            | fixed wall-clock sleep -- syncs our send cadence to    |
+            | the device's actual readiness. Falls back to moving     |
+            | on immediately if no reply shows up within the timeout,  |
+            | so a device that doesn't ack (or a dropped ack) can't      |
+            | stall the stream outright.                                  |
+            \*-----------------------------------------------------*/
+            unsigned char ack_buf[16];
+            hid_read_timeout(device, ack_buf, sizeof(ack_buf), ACK_TIMEOUT_MS);
+        }
+        else
+        {
+            auto elapsed = std::chrono::steady_clock::now() - cycle_start;
+            auto remaining = std::chrono::milliseconds(refresh_interval_ms) - elapsed;
+            if(remaining > std::chrono::milliseconds(0))
+            {
+                std::this_thread::sleep_for(remaining);
+            }
         }
     }
 }
