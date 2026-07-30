@@ -13,12 +13,13 @@
 |       containing the JPEG SOI marker is sent LAST within a    |
 |       frame and carries idx == N (total chunks) and flag      |
 |       0x80; all other chunks carry flag 0x00                  |
-|     - 5ms delay between chunk writes is the known-safe        |
-|       default; going faster risks wedging the endpoint on     |
-|       at least one tested host (needs a physical USB replug   |
-|       to recover) -- tunable via THERMALTAKE_AIO_CHUNK_DELAY_US|
-|       / THERMALTAKE_AIO_REFRESH_MS env vars for testing        |
-|       a lower value without rebuilding each time                |
+|     - 1ms delay between chunk writes is the shipped default,  |
+|       extensively validated safe on this host; going much      |
+|       lower (sub-500us) risks wedging the endpoint on at least   |
+|       one tested host (needs a physical USB replug to recover)   |
+|       -- tunable via THERMALTAKE_AIO_CHUNK_DELAY_US env var, and  |
+|       refresh interval is also live-adjustable via the UI slider  |
+|       (SetTargetFps) without needing a rebuild or relaunch          |
 |                                                             |
 |   This file is part of the OpenRGB project                 |
 |   SPDX-License-Identifier: GPL-2.0-or-later                |

@@ -23,7 +23,7 @@ ThermaltakeAIODevice::ThermaltakeAIODevice()
     , overlay_enabled(false)
     , images_version(0)
     , render_version(0)
-    , inter_chunk_delay_us(5000)
+    , inter_chunk_delay_us(1000)
     , refresh_interval_ms(50)
     , ack_pace(false)
 {
