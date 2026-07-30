@@ -9,7 +9,6 @@
 #include "ui_ThermaltakeAIOTab.h"
 
 #include <QFileDialog>
-#include <QBuffer>
 #include <QImage>
 #include <QImageReader>
 #include <QTimer>
@@ -71,55 +70,47 @@ void ThermaltakeAIOTab::on_choose_image_button_clicked()
     }
 
     /*-----------------------------------------------------*\
-    | QImageReader exposes every frame of an animated GIF   |
-    | (or any other multi-frame format Qt supports); for a  |
-    | plain static image imageCount() is just 1. Each frame |
-    | gets the same center-crop/resize/JPEG-encode treatment|
-    | and the device cycles through them one per refresh.   |
+    | QImageReader::read() auto-advances to the next frame  |
+    | on its own for animated formats like GIF -- no        |
+    | jumpToNextImage() needed (and combining the two just  |
+    | double-advances, or the plugin refuses the sequence,  |
+    | which is why an earlier version of this only ever     |
+    | captured frame 0). For a plain static image, read()   |
+    | just returns one frame then a null image next call.   |
+    | Cropped/resized QImages are handed to the device as-  |
+    | is -- it re-encodes JPEG per send cycle so the sensor  |
+    | overlay (if enabled) can be redrawn with fresh values. |
     \*-----------------------------------------------------*/
     QImageReader reader(path);
     reader.setAutoTransform(true);
 
-    QVector<QByteArray> frames;
+    QVector<QImage> loaded_images;
     QImage first_frame;
+    QImage image;
 
-    while(true)
+    while(!(image = reader.read()).isNull())
     {
-        QImage image = reader.read();
-        if(image.isNull())
-        {
-            break;
-        }
-
         int side = qMin(image.width(), image.height());
         QRect crop_rect((image.width() - side) / 2, (image.height() - side) / 2, side, side);
         QImage square = image.copy(crop_rect).scaled(ThermaltakeAIODevice::PANEL_SIZE, ThermaltakeAIODevice::PANEL_SIZE,
-                                                      Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+                                                      Qt::IgnoreAspectRatio, Qt::SmoothTransformation)
+                                              .convertToFormat(QImage::Format_RGB32);
 
         if(first_frame.isNull())
         {
             first_frame = square;
         }
 
-        QByteArray jpeg_bytes;
-        QBuffer buffer(&jpeg_bytes);
-        buffer.open(QIODevice::WriteOnly);
-        square.save(&buffer, "JPEG", 90);
-        frames.push_back(jpeg_bytes);
-
-        if(!reader.jumpToNextImage())
-        {
-            break;
-        }
+        loaded_images.push_back(square);
     }
 
-    if(frames.isEmpty())
+    if(loaded_images.isEmpty())
     {
         ui->connection_status_label->setText("Failed to load image");
         return;
     }
 
-    device->SetFrames(frames);
+    device->SetImages(loaded_images);
 
     current_image_path = path;
     ui->preview_label->setPixmap(QPixmap::fromImage(first_frame).scaled(ui->preview_label->size(),
@@ -139,6 +130,11 @@ void ThermaltakeAIOTab::on_start_stop_button_clicked()
     }
 
     UpdateStartStopButtonLabel();
+}
+
+void ThermaltakeAIOTab::on_sensor_overlay_checkbox_toggled(bool checked)
+{
+    device->SetOverlayEnabled(checked);
 }
 
 void ThermaltakeAIOTab::UpdateStartStopButtonLabel()

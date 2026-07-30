@@ -26,6 +26,7 @@ public:
 private slots:
     void on_choose_image_button_clicked();
     void on_start_stop_button_clicked();
+    void on_sensor_overlay_checkbox_toggled(bool checked);
     void RefreshConnectionStatus();
 
 private:

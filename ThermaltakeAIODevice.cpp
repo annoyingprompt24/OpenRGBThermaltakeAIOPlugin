@@ -9,12 +9,19 @@
 #include <hidapi.h>
 #include <thread>
 #include <chrono>
+#include <QBuffer>
+#include <QPainter>
+#include <QFont>
+#include <QFontMetrics>
 
 ThermaltakeAIODevice::ThermaltakeAIODevice()
     : device(nullptr)
     , worker_thread(nullptr)
     , streaming(false)
+    , overlay_enabled(false)
 {
+    /* Force an immediate sensor read on the first overlay-enabled frame. */
+    cached_readings_time = std::chrono::steady_clock::now() - std::chrono::hours(1);
 }
 
 ThermaltakeAIODevice::~ThermaltakeAIODevice()
@@ -70,10 +77,59 @@ bool ThermaltakeAIODevice::IsConnected() const
     return(device != nullptr);
 }
 
-void ThermaltakeAIODevice::SetFrames(const QVector<QByteArray>& jpeg_frames)
+void ThermaltakeAIODevice::SetImages(const QVector<QImage>& new_images)
 {
-    QMutexLocker locker(&frames_mutex);
-    frames = jpeg_frames;
+    QMutexLocker locker(&images_mutex);
+    images = new_images;
+}
+
+void ThermaltakeAIODevice::SetOverlayEnabled(bool enabled)
+{
+    overlay_enabled = enabled;
+}
+
+void ThermaltakeAIODevice::DrawOverlay(QImage* image, const ThermaltakeAIOSensorReadings& readings)
+{
+    QStringList parts;
+    if(readings.cpu_ok) parts << QString("CPU %1°C").arg(readings.cpu_temp_c, 0, 'f', 0);
+    if(readings.gpu_ok) parts << QString("GPU %1°C").arg(readings.gpu_temp_c, 0, 'f', 0);
+    if(readings.ram_ok) parts << QString("RAM %1°C").arg(readings.ram_temp_c, 0, 'f', 0);
+
+    if(parts.isEmpty())
+    {
+        return;
+    }
+
+    QString text = parts.join("   ");
+
+    QPainter painter(image);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setRenderHint(QPainter::TextAntialiasing);
+
+    QFont font = painter.font();
+    font.setPixelSize(image->height() / 16);
+    font.setBold(true);
+    painter.setFont(font);
+
+    QFontMetrics metrics(font);
+    QRect text_rect = metrics.boundingRect(text);
+
+    /*-----------------------------------------------------*\
+    | The panel is round -- keep the bar horizontally       |
+    | centered and near vertical-center (widest safe band   |
+    | on a circle) rather than near the top/bottom edges     |
+    | where a wide bar would get clipped by the bezel.       |
+    \*-----------------------------------------------------*/
+    int    bar_height = text_rect.height() + image->height() / 20;
+    int    bar_y       = static_cast<int>(image->height() * 0.72) - bar_height / 2;
+    QRect  bar_rect(0, bar_y, image->width(), bar_height);
+
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor(0, 0, 0, 140));
+    painter.drawRect(bar_rect);
+
+    painter.setPen(Qt::white);
+    painter.drawText(bar_rect, Qt::AlignCenter, text);
 }
 
 QVector<QByteArray> ThermaltakeAIODevice::ChunkFrame(const QByteArray& jpeg_bytes)
@@ -152,23 +208,39 @@ void ThermaltakeAIODevice::RunLoop()
 
     while(streaming.load())
     {
-        QByteArray frame;
+        QImage base_image;
 
         {
-            QMutexLocker locker(&frames_mutex);
-            if(frames.isEmpty())
+            QMutexLocker locker(&images_mutex);
+            if(images.isEmpty())
             {
                 locker.unlock();
                 std::this_thread::sleep_for(std::chrono::milliseconds(REFRESH_INTERVAL_MS));
                 continue;
             }
-            frame = frames[frame_index % frames.size()];
+            base_image = images[frame_index % images.size()];
             frame_index++;
         }
 
         auto cycle_start = std::chrono::steady_clock::now();
 
-        QVector<QByteArray> chunks = ChunkFrame(frame);
+        if(overlay_enabled.load())
+        {
+            if(cycle_start - cached_readings_time >= std::chrono::milliseconds(SENSOR_REFRESH_INTERVAL_MS))
+            {
+                cached_readings      = ThermaltakeAIOSensors::ReadAll();
+                cached_readings_time = cycle_start;
+            }
+
+            DrawOverlay(&base_image, cached_readings);
+        }
+
+        QByteArray jpeg_bytes;
+        QBuffer buffer(&jpeg_bytes);
+        buffer.open(QIODevice::WriteOnly);
+        base_image.save(&buffer, "JPEG", 90);
+
+        QVector<QByteArray> chunks = ChunkFrame(jpeg_bytes);
         for(const QByteArray& chunk : chunks)
         {
             if(!streaming.load())

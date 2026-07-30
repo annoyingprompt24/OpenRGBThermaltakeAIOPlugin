@@ -24,11 +24,14 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <QObject>
 #include <QThread>
 #include <QVector>
 #include <QByteArray>
+#include <QImage>
 #include <QMutex>
+#include "ThermaltakeAIOSensors.h"
 
 struct hid_device_;
 typedef struct hid_device_ hid_device;
@@ -54,11 +57,22 @@ public:
     bool                IsConnected() const;
 
     /*-----------------------------------------------------*\
-    | Replace the frame set being streamed. A single frame  |
-    | streams as a static image; multiple frames cycle as   |
-    | an animation, one frame per refresh.                  |
+    | Replace the image set being streamed. A single image  |
+    | streams as a static picture; multiple images cycle as |
+    | an animation, one per refresh. Images are re-encoded  |
+    | to JPEG on every send cycle (cheap at this size) so    |
+    | the sensor overlay, if enabled, can be redrawn with    |
+    | current values without needing separate per-frame      |
+    | pre-rendered variants.                                  |
     \*-----------------------------------------------------*/
-    void                SetFrames(const QVector<QByteArray>& jpeg_frames);
+    void                SetImages(const QVector<QImage>& images);
+
+    /*-----------------------------------------------------*\
+    | Toggle the CPU/GPU/RAM temperature overlay. Sensor     |
+    | values are re-read at most once a second regardless    |
+    | of the panel's own refresh rate.                        |
+    \*-----------------------------------------------------*/
+    void                SetOverlayEnabled(bool enabled);
 
     /*-----------------------------------------------------*\
     | Start/stop the continuous background send loop. The   |
@@ -72,16 +86,22 @@ public:
 private:
     void                RunLoop();
     static QVector<QByteArray> ChunkFrame(const QByteArray& jpeg_bytes);
+    static void         DrawOverlay(QImage* image, const ThermaltakeAIOSensorReadings& readings);
 
     hid_device*         device;
     QThread*            worker_thread;
     std::atomic<bool>   streaming;
+    std::atomic<bool>   overlay_enabled;
 
-    QMutex              frames_mutex;
-    QVector<QByteArray> frames;
+    QMutex              images_mutex;
+    QVector<QImage>     images;
 
-    static constexpr int  CHUNK_PAYLOAD        = 1020;
-    static constexpr int  CHUNK_TOTAL          = 1024;
-    static constexpr int  INTER_CHUNK_DELAY_MS = 5;
-    static constexpr int  REFRESH_INTERVAL_MS  = 50;   /* ~20fps target, matches captured device cadence */
+    ThermaltakeAIOSensorReadings          cached_readings;
+    std::chrono::steady_clock::time_point cached_readings_time;
+
+    static constexpr int  CHUNK_PAYLOAD          = 1020;
+    static constexpr int  CHUNK_TOTAL            = 1024;
+    static constexpr int  INTER_CHUNK_DELAY_MS   = 5;
+    static constexpr int  REFRESH_INTERVAL_MS    = 50;    /* ~20fps target, matches captured device cadence */
+    static constexpr int  SENSOR_REFRESH_INTERVAL_MS = 1000;
 };

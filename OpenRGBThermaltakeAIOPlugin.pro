@@ -70,10 +70,12 @@ INCLUDEPATH +=                                                                  
 HEADERS +=                                                                                       \
     OpenRGBThermaltakeAIOPlugin.h                                                                \
     ThermaltakeAIODevice.h                                                                       \
+    ThermaltakeAIOSensors.h                                                                      \
     ThermaltakeAIOTab.h                                                                          \
 
 SOURCES +=                                                                                       \
     OpenRGBThermaltakeAIOPlugin.cpp                                                              \
+    ThermaltakeAIOSensors.cpp                                                                    \
     ThermaltakeAIODevice.cpp                                                                     \
     ThermaltakeAIOTab.cpp                                                                        \
 
