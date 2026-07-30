@@ -1,0 +1,15 @@
+*.pro.user*
+*.o
+ui_*
+moc_*
+qrc_*
+Makefile
+.qmake.stash
+moc_predefs.h
+.vscode
+build
+release
+debug
+libOpenRGBThermaltakeAIOPlugin.so*
+OpenRGBThermaltakeAIOPlugin.json
+*.qm
