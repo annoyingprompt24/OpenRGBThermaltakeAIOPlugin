@@ -21,7 +21,7 @@ VERSION_STR = 0.1.0
 
 PROJECT_DESC = "Custom image/animation display for the Thermaltake AIO round LCD screen"
 PROJECT_NAME = "Thermaltake AIO LCD Plugin"
-PROJECT_URL  = "https://gitlab.com/annoyingprompt24/OpenRGBThermaltakeAIOPlugin"
+PROJECT_URL  = "https://github.com/annoyingprompt24/OpenRGBThermaltakeAIOPlugin"
 
 GIT_COMMIT_ID = $$system(git log -n 1 --pretty=format:"%H" 2>/dev/null)
 isEmpty(GIT_COMMIT_ID): GIT_COMMIT_ID = "unknown"
