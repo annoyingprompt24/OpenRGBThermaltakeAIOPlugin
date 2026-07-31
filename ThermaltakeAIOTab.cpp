@@ -10,6 +10,7 @@
 
 #include <QFileDialog>
 #include <QColorDialog>
+#include <QPushButton>
 #include <QImage>
 #include <QImageReader>
 #include <QPainter>
@@ -19,18 +20,32 @@
 ThermaltakeAIOTab::ThermaltakeAIOTab(QWidget* parent) :
     QWidget(parent),
     ui(new Ui::ThermaltakeAIOTab),
-    background_color(Qt::black)
+    background_color(Qt::black),
+    /* Defaults must match ThermaltakeAIODevice's own initial module colours. */
+    module_color_cpu(255, 99, 71),
+    module_color_gpu(94, 214, 108),
+    module_color_ram(84, 170, 255)
 {
     ui->setupUi(this);
 
     device = new ThermaltakeAIODevice();
+
+    /*-----------------------------------------------------*\
+    | Visualisation selector -- only the radial gauge for    |
+    | now, but the dropdown is here so more views can be      |
+    | added without reworking the UI.                         |
+    \*-----------------------------------------------------*/
+    ui->visualisation_combo->addItem("Radial Gauge");
 
     /* Reflect whatever target fps the device actually started with (default, or env override). */
     int initial_fps = device->GetTargetFps();
     ui->fps_slider->setValue(initial_fps);
     ui->fps_slider_label->setText(QString("Target FPS: %1").arg(initial_fps));
 
+    device->SetModuleColors(module_color_cpu, module_color_gpu, module_color_ram);
+
     UpdateBackgroundColorButtonSwatch();
+    UpdateModuleColorSwatches();
     RefreshConnectionStatus();
 
     /*-----------------------------------------------------*\
@@ -60,7 +75,7 @@ void ThermaltakeAIOTab::RefreshConnectionStatus()
     if(device->IsConnected())
     {
         ui->connection_status_label->setText("Panel connected");
-        ui->start_stop_button->setEnabled(!current_image_path.isEmpty());
+        ui->start_stop_button->setEnabled(has_streamable_content);
     }
     else
     {
@@ -79,6 +94,24 @@ void ThermaltakeAIOTab::on_choose_image_button_clicked()
     }
 
     LoadAndStreamImage(path);
+}
+
+void ThermaltakeAIOTab::on_blank_canvas_button_clicked()
+{
+    QImage blank(ThermaltakeAIODevice::PANEL_SIZE, ThermaltakeAIODevice::PANEL_SIZE, QImage::Format_RGB32);
+    blank.fill(Qt::black);
+
+    QVector<QImage> single_image;
+    single_image.push_back(blank);
+    device->SetImages(single_image);
+
+    /* Not a file -- clear so the background-color re-composite path doesn't try to reload one. */
+    current_image_path.clear();
+    has_streamable_content = true;
+
+    ui->preview_label->setPixmap(QPixmap::fromImage(blank).scaled(ui->preview_label->size(),
+                                                                     Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    ui->start_stop_button->setEnabled(device->IsConnected());
 }
 
 void ThermaltakeAIOTab::on_background_color_button_clicked()
@@ -156,7 +189,8 @@ void ThermaltakeAIOTab::LoadAndStreamImage(const QString& path)
 
     device->SetImages(loaded_images);
 
-    current_image_path = path;
+    current_image_path     = path;
+    has_streamable_content = true;
     ui->preview_label->setPixmap(QPixmap::fromImage(first_frame).scaled(ui->preview_label->size(),
                                                                           Qt::KeepAspectRatio, Qt::SmoothTransformation));
     ui->start_stop_button->setEnabled(device->IsConnected());
@@ -183,9 +217,79 @@ void ThermaltakeAIOTab::on_start_stop_button_clicked()
     UpdateStartStopButtonLabel();
 }
 
-void ThermaltakeAIOTab::on_sensor_overlay_checkbox_toggled(bool checked)
+void ThermaltakeAIOTab::on_visualisation_combo_currentIndexChanged(int index)
 {
-    device->SetOverlayEnabled(checked);
+    /*-----------------------------------------------------*\
+    | Only the radial gauge exists today, so there's nothing |
+    | to switch between yet -- this hook is here so adding a  |
+    | second visualisation later is a UI-only change.         |
+    \*-----------------------------------------------------*/
+    (void)index;
+}
+
+void ThermaltakeAIOTab::on_radial_off_radio_toggled(bool checked)
+{
+    if(checked)
+    {
+        device->SetOverlayMode(ThermaltakeAIODevice::OverlayMode::Off);
+    }
+}
+
+void ThermaltakeAIOTab::on_radial_temp_radio_toggled(bool checked)
+{
+    if(checked)
+    {
+        device->SetOverlayMode(ThermaltakeAIODevice::OverlayMode::Temperature);
+    }
+}
+
+void ThermaltakeAIOTab::on_radial_util_radio_toggled(bool checked)
+{
+    if(checked)
+    {
+        device->SetOverlayMode(ThermaltakeAIODevice::OverlayMode::Utilization);
+    }
+}
+
+void ThermaltakeAIOTab::on_cpu_color_button_clicked()
+{
+    PickModuleColor(&module_color_cpu, "CPU");
+}
+
+void ThermaltakeAIOTab::on_gpu_color_button_clicked()
+{
+    PickModuleColor(&module_color_gpu, "GPU");
+}
+
+void ThermaltakeAIOTab::on_ram_color_button_clicked()
+{
+    PickModuleColor(&module_color_ram, "RAM");
+}
+
+void ThermaltakeAIOTab::PickModuleColor(QColor* target, const QString& module_name)
+{
+    QColor chosen = QColorDialog::getColor(*target, this, QString("%1 Gauge Color").arg(module_name));
+    if(!chosen.isValid())
+    {
+        return;
+    }
+
+    *target = chosen;
+    device->SetModuleColors(module_color_cpu, module_color_gpu, module_color_ram);
+    UpdateModuleColorSwatches();
+}
+
+void ThermaltakeAIOTab::UpdateModuleColorSwatch(QPushButton* button, const QColor& color)
+{
+    QString text_color = (color.lightness() > 128) ? "black" : "white";
+    button->setStyleSheet(QString("background-color: %1; color: %2;").arg(color.name(), text_color));
+}
+
+void ThermaltakeAIOTab::UpdateModuleColorSwatches()
+{
+    UpdateModuleColorSwatch(ui->cpu_color_button, module_color_cpu);
+    UpdateModuleColorSwatch(ui->gpu_color_button, module_color_gpu);
+    UpdateModuleColorSwatch(ui->ram_color_button, module_color_ram);
 }
 
 void ThermaltakeAIOTab::on_debug_frame_index_checkbox_toggled(bool checked)

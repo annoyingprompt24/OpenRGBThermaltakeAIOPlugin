@@ -35,6 +35,11 @@
 #include <QByteArray>
 #include <QImage>
 #include <QMutex>
+#include <QPainter>
+#include <QRectF>
+#include <QPointF>
+#include <QColor>
+#include <QString>
 #include "ThermaltakeAIOSensors.h"
 
 struct hid_device_;
@@ -51,6 +56,20 @@ public:
     static constexpr unsigned short VENDOR_ID  = 0x264A;
     static constexpr unsigned short PRODUCT_ID = 0x233C;
     static constexpr int            PANEL_SIZE = 480;
+
+    /*-----------------------------------------------------*\
+    | What the radial gauge overlay renders. Off draws       |
+    | nothing; Temperature and Utilization share the same    |
+    | three-ring layout and per-module colours, differing    |
+    | only in the data source and the readout suffix          |
+    | (degrees vs percent).                                   |
+    \*-----------------------------------------------------*/
+    enum class OverlayMode
+    {
+        Off         = 0,
+        Temperature = 1,
+        Utilization = 2,
+    };
 
     /*-----------------------------------------------------*\
     | Opens interface 1 of the panel. Returns false if the  |
@@ -73,11 +92,21 @@ public:
     void                SetImages(const QVector<QImage>& images);
 
     /*-----------------------------------------------------*\
-    | Toggle the CPU/GPU/RAM temperature overlay. Sensor     |
-    | values are re-read at most once a second regardless    |
-    | of the panel's own refresh rate.                        |
+    | Select the radial gauge overlay's data source (or Off).|
+    | Sensor values are re-read at most once a second        |
+    | regardless of the panel's own refresh rate. Switching   |
+    | mode re-snaps the eased display values to the new        |
+    | metric so a temp reading doesn't visibly slide toward a  |
+    | percentage (or vice versa).                              |
     \*-----------------------------------------------------*/
-    void                SetOverlayEnabled(bool enabled);
+    void                SetOverlayMode(OverlayMode mode);
+
+    /*-----------------------------------------------------*\
+    | Per-module ring/readout colours, shared across the     |
+    | temperature and utilization views. Safe to call from   |
+    | the UI thread while the send loop is running.           |
+    \*-----------------------------------------------------*/
+    void                SetModuleColors(const QColor& cpu, const QColor& gpu, const QColor& ram);
 
     /*-----------------------------------------------------*\
     | Debug aid: draws "Frame i/N" on every sent frame, for   |
@@ -107,13 +136,49 @@ public:
 private:
     void                RunLoop();
     static QVector<QByteArray> ChunkFrame(const QByteArray& jpeg_bytes);
-    static void         DrawOverlay(QImage* image, const ThermaltakeAIOSensorReadings& readings);
+
+    /*-----------------------------------------------------*\
+    | Draws the CPU/GPU/RAM radial gauges. Not static -- it   |
+    | needs the per-instance smoothed_* state below, which     |
+    | eases toward each new sensor reading a little every        |
+    | frame so the needle moves continuously even though raw       |
+    | sensor reads only happen once/second (SENSOR_REFRESH_          |
+    | INTERVAL_MS). Called every frame while the overlay is on,       |
+    | RunLoop-thread-only, no mutex needed.                             |
+    \*-----------------------------------------------------*/
+    void                DrawOverlay(QImage* image, const ThermaltakeAIOSensorReadings& readings, OverlayMode mode);
+    static void         DrawRing(QPainter& painter, const QPointF& center, float radius, float thickness,
+                                  float value, float min_val, float max_val, const QColor& color);
+
+    /*-----------------------------------------------------*\
+    | Sends the one-way, unreplied report seen on interface  |
+    | 0 (EP1 OUT, report ID 0x12, 440 bytes: 12 01 00 80 64  |
+    | then zero-padded) in a real TT RGB PLUS capture. It      |
+    | appeared exactly 4 times in a 168s session, always       |
+    | right as continuous EP3 streaming was about to start      |
+    | or right as the streamed content source was about to       |
+    | change (idle graphic -> loading animation -> user's final    |
+    | image) -- never once during steady unchanging playback.        |
+    | Experimental: testing whether replicating it (which we never    |
+    | send at all currently) affects the per-frame GIF corruption.      |
+    \*-----------------------------------------------------*/
+    void                SendResyncCommand();
 
     hid_device*         device;
+    hid_device*         device_iface0;
     QThread*            worker_thread;
     std::atomic<bool>   streaming;
-    std::atomic<bool>   overlay_enabled;
+    std::atomic<OverlayMode> overlay_mode;
     std::atomic<bool>   debug_frame_index_enabled;
+
+    /*-----------------------------------------------------*\
+    | Per-module colours as packed QRgb so they can be read  |
+    | lock-free from the send loop while the UI thread sets   |
+    | them (QColor itself isn't atomic).                       |
+    \*-----------------------------------------------------*/
+    std::atomic<QRgb>   module_color_cpu;
+    std::atomic<QRgb>   module_color_gpu;
+    std::atomic<QRgb>   module_color_ram;
 
     QMutex              images_mutex;
     QVector<QImage>     images;
@@ -133,6 +198,19 @@ private:
 
     ThermaltakeAIOSensorReadings          cached_readings;
     std::chrono::steady_clock::time_point cached_readings_time;
+
+    /*-----------------------------------------------------*\
+    | Eased-toward-target display values so the gauge markers |
+    | move smoothly every frame. These hold whatever the      |
+    | active overlay mode's metric is (temp or util) -- a      |
+    | mode switch clears smoothing_initialized so they snap    |
+    | to the new metric instead of sliding across from the     |
+    | old one's scale.                                         |
+    \*-----------------------------------------------------*/
+    float               smoothed_cpu;
+    float               smoothed_gpu;
+    float               smoothed_ram;
+    std::atomic<bool>   smoothing_initialized;
 
     static constexpr int  CHUNK_PAYLOAD          = 1020;
     static constexpr int  CHUNK_TOTAL            = 1024;

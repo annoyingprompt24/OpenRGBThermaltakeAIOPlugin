@@ -11,105 +11,51 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
-#include <csetjmp>
+#include <cmath>
+#include <cstring>
+#include <algorithm>
+#ifdef __linux__
+#include <pthread.h>
+#include <sched.h>
+#endif
 #include <QPainter>
 #include <QFont>
 #include <QFontMetrics>
-
-extern "C" {
-#include <jpeglib.h>
-}
-
-namespace
-{
-    struct JpegErrorContext
-    {
-        struct jpeg_error_mgr pub;
-        jmp_buf setjmp_buffer;
-    };
-
-    void JpegErrorExit(j_common_ptr cinfo)
-    {
-        JpegErrorContext* err = reinterpret_cast<JpegErrorContext*>(cinfo->err);
-        std::longjmp(err->setjmp_buffer, 1);
-    }
-}
+#include <QBuffer>
+#include <QtMath>
 
 /*-----------------------------------------------------------------------*\
-| Encodes with 4:4:4 chroma subsampling (no subsampling at all) instead  |
-| of Qt's default JPEG writer, which always produces 4:2:0 and has no    |
-| public API to change it. This specific panel requires 4:4:4 for the    |
-| continuous EP3 streaming path -- 4:2:0 causes corrupted garbage in      |
-| part of the displayed frame (documented independently by another         |
-| reverse-engineer of this exact device, 264A:233C -- boot/standby image    |
-| upload is a separate path that reportedly wants 4:2:0, opposite of        |
-| streaming, but we only use the streaming path here).                       |
+| Qt's built-in JPEG writer (4:2:0 chroma subsampling). A Windows USB     |
+| capture of the real TT RGB PLUS software confirmed the device's own     |
+| encoder also uses plain 4:2:0 (SOF0 sampling factors 2x2/1x1/1x1) for    |
+| this exact panel over the streaming path, so there is no need for the   |
+| hand-rolled libjpeg 4:4:4 encoder this used to be.                       |
 \*-----------------------------------------------------------------------*/
-static QByteArray EncodeJpeg444(const QImage& image, int quality)
+static QByteArray EncodeJpeg(const QImage& image, int quality)
 {
-    QImage rgb = image.convertToFormat(QImage::Format_RGB888);
-
-    struct jpeg_compress_struct cinfo;
-    JpegErrorContext jerr;
-    cinfo.err = jpeg_std_error(&jerr.pub);
-    jerr.pub.error_exit = JpegErrorExit;
-
-    unsigned char* out_buffer = nullptr;
-    unsigned long  out_size   = 0;
-
-    if(setjmp(jerr.setjmp_buffer))
-    {
-        jpeg_destroy_compress(&cinfo);
-        if(out_buffer != nullptr)
-        {
-            free(out_buffer);
-        }
-        return(QByteArray());
-    }
-
-    jpeg_create_compress(&cinfo);
-    jpeg_mem_dest(&cinfo, &out_buffer, &out_size);
-
-    cinfo.image_width      = rgb.width();
-    cinfo.image_height     = rgb.height();
-    cinfo.input_components = 3;
-    cinfo.in_color_space   = JCS_RGB;
-
-    jpeg_set_defaults(&cinfo);
-    jpeg_set_quality(&cinfo, quality, TRUE);
-
-    for(int c = 0; c < cinfo.num_components; c++)
-    {
-        cinfo.comp_info[c].h_samp_factor = 1;
-        cinfo.comp_info[c].v_samp_factor = 1;
-    }
-
-    jpeg_start_compress(&cinfo, TRUE);
-
-    while(cinfo.next_scanline < cinfo.image_height)
-    {
-        JSAMPROW row = const_cast<JSAMPROW>(rgb.constScanLine(cinfo.next_scanline));
-        jpeg_write_scanlines(&cinfo, &row, 1);
-    }
-
-    jpeg_finish_compress(&cinfo);
-
-    QByteArray result(reinterpret_cast<const char*>(out_buffer), static_cast<int>(out_size));
-
-    jpeg_destroy_compress(&cinfo);
-    free(out_buffer);
-
+    QByteArray result;
+    QBuffer buffer(&result);
+    buffer.open(QIODevice::WriteOnly);
+    image.save(&buffer, "JPG", quality);
     return(result);
 }
 
 ThermaltakeAIODevice::ThermaltakeAIODevice()
     : device(nullptr)
+    , device_iface0(nullptr)
     , worker_thread(nullptr)
     , streaming(false)
-    , overlay_enabled(false)
+    , overlay_mode(OverlayMode::Off)
     , debug_frame_index_enabled(false)
+    , module_color_cpu(qRgb(255, 99, 71))
+    , module_color_gpu(qRgb(94, 214, 108))
+    , module_color_ram(qRgb(84, 170, 255))
     , images_version(0)
     , render_version(0)
+    , smoothed_cpu(0.0f)
+    , smoothed_gpu(0.0f)
+    , smoothed_ram(0.0f)
+    , smoothing_initialized(false)
     , inter_chunk_delay_us(1000)
     , refresh_interval_ms(50)
     , ack_pace(false)
@@ -154,16 +100,23 @@ bool ThermaltakeAIODevice::Open()
 
     /*-----------------------------------------------------*\
     | Interface 1 is the 1024-byte interrupt interface that |
-    | accepts the chunked JPEG stream -- interface 0 is a    |
-    | separate serial-number/telemetry channel, unrelated    |
-    | to display.                                            |
+    | accepts the chunked JPEG stream. Interface 0 is a 440-  |
+    | byte serial-number/telemetry channel -- unrelated to     |
+    | the pixel data itself, but a real capture showed the      |
+    | vendor software sends one specific one-way report on it    |
+    | (see SendResyncCommand()) right as streaming starts or       |
+    | the content source changes, so we open it too even though     |
+    | we don't use it for the image data.                             |
     \*-----------------------------------------------------*/
     while(info_temp)
     {
         if(info_temp->interface_number == 1)
         {
             device = hid_open_path(info_temp->path);
-            break;
+        }
+        else if(info_temp->interface_number == 0)
+        {
+            device_iface0 = hid_open_path(info_temp->path);
         }
         info_temp = info_temp->next;
     }
@@ -180,6 +133,29 @@ void ThermaltakeAIODevice::Close()
         hid_close(device);
         device = nullptr;
     }
+    if(device_iface0 != nullptr)
+    {
+        hid_close(device_iface0);
+        device_iface0 = nullptr;
+    }
+}
+
+void ThermaltakeAIODevice::SendResyncCommand()
+{
+    if(device_iface0 == nullptr)
+    {
+        return;
+    }
+
+    unsigned char report[440] = { 0 };
+    report[0] = 0x12;
+    report[1] = 0x01;
+    report[2] = 0x00;
+    report[3] = 0x80;
+    report[4] = 0x64;
+
+    int result = hid_write(device_iface0, report, sizeof(report));
+    std::fprintf(stderr, "[ThermaltakeAIOPlugin] sent interface-0 resync command (0x12), result=%d\n", result);
 }
 
 bool ThermaltakeAIODevice::IsConnected() const
@@ -189,15 +165,33 @@ bool ThermaltakeAIODevice::IsConnected() const
 
 void ThermaltakeAIODevice::SetImages(const QVector<QImage>& new_images)
 {
-    QMutexLocker locker(&images_mutex);
-    images = new_images;
-    images_version++;
+    {
+        QMutexLocker locker(&images_mutex);
+        images = new_images;
+        images_version++;
+        render_version++;
+    }
+
+    /* Mirrors the real capture: sent right as the streamed content source changes. */
+    if(streaming.load())
+    {
+        SendResyncCommand();
+    }
+}
+
+void ThermaltakeAIODevice::SetOverlayMode(OverlayMode mode)
+{
+    overlay_mode = mode;
+    /* Snap the eased display values to the new metric's scale on the next frame. */
+    smoothing_initialized = false;
     render_version++;
 }
 
-void ThermaltakeAIODevice::SetOverlayEnabled(bool enabled)
+void ThermaltakeAIODevice::SetModuleColors(const QColor& cpu, const QColor& gpu, const QColor& ram)
 {
-    overlay_enabled = enabled;
+    module_color_cpu = cpu.rgb();
+    module_color_gpu = gpu.rgb();
+    module_color_ram = ram.rgb();
     render_version++;
 }
 
@@ -207,48 +201,143 @@ void ThermaltakeAIODevice::SetDebugFrameIndexEnabled(bool enabled)
     render_version++;
 }
 
-void ThermaltakeAIODevice::DrawOverlay(QImage* image, const ThermaltakeAIOSensorReadings& readings)
+void ThermaltakeAIODevice::DrawRing(QPainter& painter, const QPointF& center, float radius, float thickness,
+                                     float value, float min_val, float max_val, const QColor& color)
 {
-    QStringList parts;
-    if(readings.cpu_ok) parts << QString("CPU %1°C").arg(readings.cpu_temp_c, 0, 'f', 0);
-    if(readings.gpu_ok) parts << QString("GPU %1°C").arg(readings.gpu_temp_c, 0, 'f', 0);
-    if(readings.ram_ok) parts << QString("RAM %1°C").arg(readings.ram_temp_c, 0, 'f', 0);
+    /*-----------------------------------------------------------------------*\
+    | Classic 270-degree tachometer sweep with a 90-degree gap at the        |
+    | bottom. Qt's drawArc()/angle math both use "0 degrees = 3 o'clock,     |
+    | positive = counter-clockwise", so the manual trig below for the        |
+    | marker position lines up with the arc without needing a coordinate     |
+    | flip. A small marker dot at the tip of the filled arc stands in for    |
+    | a needle here -- three concentric rings sharing one center can't       |
+    | each draw a full needle to that center without them all overlapping    |
+    | in a tangle, so the marker keeps the "current position" read at a      |
+    | glance without the clutter, leaving the shared center free for text.   |
+    \*-----------------------------------------------------------------------*/
+    const float start_angle_deg = 225.0f;
+    const float span_deg        = 270.0f;
 
-    if(parts.isEmpty())
+    float fraction = (max_val > min_val) ? (value - min_val) / (max_val - min_val) : 0.0f;
+    fraction = qBound(0.0f, fraction, 1.0f);
+
+    QRectF rect(center.x() - radius, center.y() - radius, radius * 2.0f, radius * 2.0f);
+
+    QPen track_pen(QColor(255, 255, 255, 30), thickness, Qt::SolidLine, Qt::FlatCap);
+    painter.setPen(track_pen);
+    painter.setBrush(Qt::NoBrush);
+    painter.drawArc(rect, static_cast<int>(start_angle_deg * 16), static_cast<int>(-span_deg * 16));
+
+    QPen value_pen(color, thickness, Qt::SolidLine, Qt::FlatCap);
+    painter.setPen(value_pen);
+    painter.drawArc(rect, static_cast<int>(start_angle_deg * 16), static_cast<int>(-span_deg * fraction * 16));
+
+    float marker_angle_rad = qDegreesToRadians(start_angle_deg - span_deg * fraction);
+    QPointF marker(center.x() + radius * std::cos(marker_angle_rad),
+                    center.y() - radius * std::sin(marker_angle_rad));
+
+    painter.setPen(QPen(Qt::white, thickness * 0.18f));
+    painter.setBrush(color);
+    painter.drawEllipse(marker, thickness * 0.52, thickness * 0.52);
+}
+
+void ThermaltakeAIODevice::DrawOverlay(QImage* image, const ThermaltakeAIOSensorReadings& readings, OverlayMode mode)
+{
+    /*-----------------------------------------------------------------------*\
+    | Pick each module's raw value + whether it's available from the active   |
+    | mode. Temperature and utilization share the exact same layout and       |
+    | 0-100 sweep (degrees C and percent both map cleanly onto it) -- only    |
+    | the data source and the readout suffix differ.                          |
+    \*-----------------------------------------------------------------------*/
+    bool   is_util = (mode == OverlayMode::Utilization);
+
+    bool   cpu_ok  = is_util ? readings.cpu_util_ok  : readings.cpu_ok;
+    bool   gpu_ok  = is_util ? readings.gpu_util_ok  : readings.gpu_ok;
+    bool   ram_ok  = is_util ? readings.ram_util_ok  : readings.ram_ok;
+
+    double cpu_val = is_util ? readings.cpu_util_pct : readings.cpu_temp_c;
+    double gpu_val = is_util ? readings.gpu_util_pct : readings.gpu_temp_c;
+    double ram_val = is_util ? readings.ram_util_pct : readings.ram_temp_c;
+
+    QString suffix = is_util ? "%" : "°";
+
+    /*-----------------------------------------------------------------------*\
+    | Ease the displayed value a little closer to the latest raw reading      |
+    | every single frame (called every RunLoop cycle while the overlay is     |
+    | on -- see the render_version++ in RunLoop) rather than only when a      |
+    | new sensor sample lands once/second. That keeps the marker moving       |
+    | smoothly at whatever the target FPS is instead of visibly jumping       |
+    | once a second, and incidentally means every frame's pixels genuinely    |
+    | differ from the last even against a plain background -- useful for      |
+    | the "does a high, ever-changing frame rate glitch on a static           |
+    | background" test. A mode switch clears smoothing_initialized so the      |
+    | values snap to the new metric rather than sliding across scales.        |
+    \*-----------------------------------------------------------------------*/
+    const float ease = 0.15f;
+
+    if(!smoothing_initialized)
+    {
+        smoothed_cpu          = cpu_ok ? cpu_val : 0.0f;
+        smoothed_gpu          = gpu_ok ? gpu_val : 0.0f;
+        smoothed_ram          = ram_ok ? ram_val : 0.0f;
+        smoothing_initialized = true;
+    }
+    else
+    {
+        if(cpu_ok) smoothed_cpu += (cpu_val - smoothed_cpu) * ease;
+        if(gpu_ok) smoothed_gpu += (gpu_val - smoothed_gpu) * ease;
+        if(ram_ok) smoothed_ram += (ram_val - smoothed_ram) * ease;
+    }
+
+    struct RingSpec { float value; QColor color; QString label; };
+    QVector<RingSpec> rings;
+    if(cpu_ok) rings.push_back({smoothed_cpu, QColor::fromRgb(module_color_cpu.load()), "CPU"});
+    if(gpu_ok) rings.push_back({smoothed_gpu, QColor::fromRgb(module_color_gpu.load()), "GPU"});
+    if(ram_ok) rings.push_back({smoothed_ram, QColor::fromRgb(module_color_ram.load()), "RAM"});
+
+    if(rings.isEmpty())
     {
         return;
     }
-
-    QString text = parts.join("   ");
 
     QPainter painter(image);
     painter.setRenderHint(QPainter::Antialiasing);
     painter.setRenderHint(QPainter::TextAntialiasing);
 
+    /*-----------------------------------------------------------------------*\
+    | Concentric rings sharing the panel's own center -- this maximizes use  |
+    | of the round display, unlike three separate side-by-side gauges which  |
+    | left most of the circle's area unused. Outermost ring first (CPU),     |
+    | stepping inward by thickness+gap for each subsequent metric.           |
+    \*-----------------------------------------------------------------------*/
+    QPointF center(image->width() / 2.0f, image->height() / 2.0f);
+    float   thickness    = qMin(image->width(), image->height()) * 0.067f;
+    float   gap          = thickness * 0.3f;
+    float   outer_radius = qMin(image->width(), image->height()) * 0.44f;
+
+    for(int i = 0; i < rings.size(); i++)
+    {
+        float radius = outer_radius - i * (thickness + gap);
+        DrawRing(painter, center, radius, thickness, rings[i].value, 0.0f, 100.0f, rings[i].color);
+    }
+
+    /* Stacked, color-matched numeric readout in the shared center. */
+    float line_height = image->height() * 0.096f;
+    float block_top    = center.y() - (line_height * rings.size()) / 2.0f;
+
     QFont font = painter.font();
-    font.setPixelSize(image->height() / 16);
+    font.setPixelSize(static_cast<int>(image->height() * 0.075f));
     font.setBold(true);
     painter.setFont(font);
 
-    QFontMetrics metrics(font);
-    QRect text_rect = metrics.boundingRect(text);
-
-    /*-----------------------------------------------------*\
-    | The panel is round -- keep the bar horizontally       |
-    | centered and near vertical-center (widest safe band   |
-    | on a circle) rather than near the top/bottom edges     |
-    | where a wide bar would get clipped by the bezel.       |
-    \*-----------------------------------------------------*/
-    int    bar_height = text_rect.height() + image->height() / 20;
-    int    bar_y       = static_cast<int>(image->height() * 0.72) - bar_height / 2;
-    QRect  bar_rect(0, bar_y, image->width(), bar_height);
-
-    painter.setPen(Qt::NoPen);
-    painter.setBrush(QColor(0, 0, 0, 140));
-    painter.drawRect(bar_rect);
-
-    painter.setPen(Qt::white);
-    painter.drawText(bar_rect, Qt::AlignCenter, text);
+    for(int i = 0; i < rings.size(); i++)
+    {
+        QRectF line_rect(center.x() - image->width() * 0.42f, block_top + i * line_height,
+                          image->width() * 0.84f, line_height);
+        painter.setPen(rings[i].color);
+        QString text = QString("%1  %2%3").arg(rings[i].label).arg(rings[i].value, 0, 'f', 0).arg(suffix);
+        painter.drawText(line_rect, Qt::AlignCenter, text);
+    }
 }
 
 QVector<QByteArray> ThermaltakeAIODevice::ChunkFrame(const QByteArray& jpeg_bytes)
@@ -300,8 +389,24 @@ void ThermaltakeAIODevice::Start()
 
     streaming = true;
 
+    /* Mirrors the real capture: sent right as continuous streaming begins. */
+    SendResyncCommand();
+
     worker_thread = QThread::create([this]() { RunLoop(); });
-    worker_thread->start();
+
+    /*-----------------------------------------------------------------------*\
+    | Experimental: a live capture during a real CPU/GPU load spike (gaming) |
+    | showed hid_write() itself blocking up to ~25ms inside the kernel's      |
+    | USB/HID stack (mean gap 393us/max 592us idle -> mean 1.3ms/max 25ms      |
+    | under load), which lines up with when panel corruption was visible.       |
+    | Asking for a higher scheduling priority for this thread specifically       |
+    | can't fix kernel-side USB controller contention, but it does reduce the      |
+    | chance this thread itself sits waiting for CPU time behind the game's         |
+    | own threads, which is part of the same failure mode. Qt falls back to          |
+    | normal priority silently if the OS refuses the request (e.g. no                 |
+    | CAP_SYS_NICE) -- not a guaranteed fix, but low-risk to try.                       |
+    \*-----------------------------------------------------------------------*/
+    worker_thread->start(QThread::TimeCriticalPriority);
 }
 
 void ThermaltakeAIODevice::Stop()
@@ -338,10 +443,31 @@ int ThermaltakeAIODevice::GetTargetFps() const
 
 void ThermaltakeAIODevice::RunLoop()
 {
-    size_t   frame_index  = 0;
-    long     sent_frames  = 0;
-    long     encode_count = 0;
-    auto     loop_start   = std::chrono::steady_clock::now();
+    /*-----------------------------------------------------------------------*\
+    | QThread::TimeCriticalPriority (set in Start()) measurably did nothing   |
+    | under a real CPU/GPU load test -- on Linux that's typically just a       |
+    | nice-value nudge within the normal SCHED_OTHER class, not real POSIX      |
+    | real-time scheduling. This session's rtprio ulimit is 99 (confirmed via   |
+    | `ulimit -Hr`/`-Sr`, granted through the @realtime/@audio PAM limits         |
+    | groups), so request actual SCHED_FIFO directly and log whether it really    |
+    | took -- don't assume, the last attempt silently not working is exactly       |
+    | why this is being verified explicitly this time.                              |
+    \*-----------------------------------------------------------------------*/
+#ifdef __linux__
+    {
+        sched_param sch_params;
+        sch_params.sched_priority = 50;
+        int rc = pthread_setschedparam(pthread_self(), SCHED_FIFO, &sch_params);
+        std::fprintf(stderr, "[ThermaltakeAIOPlugin] pthread_setschedparam(SCHED_FIFO, prio=50) => %s\n",
+                     rc == 0 ? "success" : std::strerror(rc));
+    }
+#endif
+
+    size_t   frame_index    = 0;
+    long     sent_frames    = 0;
+    long     encode_count   = 0;
+    auto     loop_start     = std::chrono::steady_clock::now();
+    auto     last_chunk_time = loop_start;
 
     /*-----------------------------------------------------*\
     | Only this thread touches these -- no mutex needed. Each  |
@@ -383,14 +509,22 @@ void ThermaltakeAIODevice::RunLoop()
             continue;
         }
 
-        if(overlay_enabled.load())
+        OverlayMode current_overlay_mode = overlay_mode.load();
+        if(current_overlay_mode != OverlayMode::Off)
         {
             if(cycle_start - cached_readings_time >= std::chrono::milliseconds(SENSOR_REFRESH_INTERVAL_MS))
             {
                 cached_readings      = ThermaltakeAIOSensors::ReadAll();
                 cached_readings_time = cycle_start;
-                render_version++;
             }
+
+            /*-----------------------------------------------------*\
+            | Every frame, not just on new sensor samples -- the    |
+            | gauge marker eases toward the latest reading a little |
+            | more each call, so it needs a fresh render (and thus  |
+            | a fresh encode) every cycle to actually animate.        |
+            \*-----------------------------------------------------*/
+            render_version++;
         }
 
         size_t idx = frame_index % local_images.size();
@@ -400,9 +534,9 @@ void ThermaltakeAIODevice::RunLoop()
         if(encoded_cache_version[idx] != current_render_version)
         {
             QImage image = local_images[idx];
-            if(overlay_enabled.load())
+            if(current_overlay_mode != OverlayMode::Off)
             {
-                DrawOverlay(&image, cached_readings);
+                DrawOverlay(&image, cached_readings, current_overlay_mode);
             }
             if(debug_frame_index_enabled.load())
             {
@@ -421,7 +555,7 @@ void ThermaltakeAIODevice::RunLoop()
                 painter.drawText(bar, Qt::AlignCenter, text);
             }
 
-            QByteArray jpeg_bytes = EncodeJpeg444(image, 90);
+            QByteArray jpeg_bytes = EncodeJpeg(image, 90);
 
             encoded_cache[idx]         = jpeg_bytes;
             encoded_cache_version[idx] = current_render_version;
@@ -432,6 +566,7 @@ void ThermaltakeAIODevice::RunLoop()
 
         QVector<QByteArray> chunks = ChunkFrame(jpeg_bytes);
         bool write_failed = false;
+        int  chunk_pos    = 0;
         for(const QByteArray& chunk : chunks)
         {
             if(!streaming.load())
@@ -439,7 +574,42 @@ void ThermaltakeAIODevice::RunLoop()
                 break;
             }
 
+            /*-----------------------------------------------------------------------*\
+            | Stall detection: this thread being descheduled, or hid_write() itself    |
+            | blocking longer than expected inside the kernel's USB/HID stack, under    |
+            | host load (e.g. a game spiking CPU/GPU/IRQ activity) is a real candidate   |
+            | for the panel-side corruption -- a long gap mid-frame means the panel       |
+            | goes a long time without expected data, which could desync whatever          |
+            | internal state its decoder keeps. Two separate things are timed: the gap      |
+            | before this write (catches this thread being slow to get back around to       |
+            | it, e.g. after sleep_for() overshooting) and the write call's own duration      |
+            | (catches hid_write() blocking internally, e.g. waiting on kernel USB/HID         |
+            | buffer space -- this part is NOT visible as a gap between calls, since any        |
+            | such delay is absorbed into the call itself rather than the time before it).       |
+            \*-----------------------------------------------------------------------*/
+            auto pre_write_time = std::chrono::steady_clock::now();
+            long gap_us = std::chrono::duration_cast<std::chrono::microseconds>(pre_write_time - last_chunk_time).count();
+            long stall_threshold_us = std::max<long>(static_cast<long>(inter_chunk_delay_us) * 5L, 3000L);
+            if(chunk_pos > 0 && gap_us > stall_threshold_us)
+            {
+                double elapsed_s = std::chrono::duration<double>(pre_write_time - loop_start).count();
+                std::fprintf(stderr, "[ThermaltakeAIOPlugin] STALL (gap-before-write): %ldus before chunk %d/%d of "
+                             "frame idx=%zu (sent_frames=%ld) at t=%.3fs\n",
+                             gap_us, chunk_pos + 1, chunks.size(), idx, sent_frames, elapsed_s);
+            }
+
             int result = hid_write(device, reinterpret_cast<const unsigned char*>(chunk.constData()), chunk.size());
+
+            auto post_write_time = std::chrono::steady_clock::now();
+            long write_duration_us = std::chrono::duration_cast<std::chrono::microseconds>(post_write_time - pre_write_time).count();
+            if(write_duration_us > stall_threshold_us)
+            {
+                double elapsed_s = std::chrono::duration<double>(post_write_time - loop_start).count();
+                std::fprintf(stderr, "[ThermaltakeAIOPlugin] STALL (hid_write blocked): %ldus for chunk %d/%d of "
+                             "frame idx=%zu (sent_frames=%ld) at t=%.3fs\n",
+                             write_duration_us, chunk_pos + 1, chunks.size(), idx, sent_frames, elapsed_s);
+            }
+
             if(result < 0)
             {
                 std::fprintf(stderr, "[ThermaltakeAIOPlugin] hid_write failed after %ld frame(s) at "
@@ -453,6 +623,9 @@ void ThermaltakeAIODevice::RunLoop()
             {
                 std::this_thread::sleep_for(std::chrono::microseconds(inter_chunk_delay_us));
             }
+
+            last_chunk_time = std::chrono::steady_clock::now();
+            chunk_pos++;
         }
 
         if(write_failed)
