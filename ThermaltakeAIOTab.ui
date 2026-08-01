@@ -134,106 +134,320 @@
     </layout>
    </item>
    <item>
-    <layout class="QHBoxLayout" name="radialModeLayout">
-     <item>
-      <widget class="QLabel" name="radial_mode_label">
-       <property name="text">
-        <string>Radial data:</string>
-       </property>
-      </widget>
-     </item>
-     <item>
-      <widget class="QRadioButton" name="radial_off_radio">
-       <property name="text">
-        <string>Off</string>
-       </property>
-       <property name="checked">
-        <bool>true</bool>
-       </property>
-      </widget>
-     </item>
-     <item>
-      <widget class="QRadioButton" name="radial_temp_radio">
-       <property name="text">
-        <string>Temperature</string>
-       </property>
-      </widget>
-     </item>
-     <item>
-      <widget class="QRadioButton" name="radial_util_radio">
-       <property name="text">
-        <string>Utilisation</string>
-       </property>
-      </widget>
-     </item>
-     <item>
-      <spacer name="radialModeSpacer">
-       <property name="orientation">
-        <enum>Qt::Horizontal</enum>
-       </property>
-       <property name="sizeHint" stdset="0">
-        <size>
-         <width>40</width>
-         <height>20</height>
-        </size>
-       </property>
-      </spacer>
-     </item>
-    </layout>
+    <widget class="QWidget" name="radial_gauge_panel" native="true">
+     <layout class="QVBoxLayout" name="radialGaugePanelLayout">
+      <property name="leftMargin">
+       <number>0</number>
+      </property>
+      <property name="rightMargin">
+       <number>0</number>
+      </property>
+      <property name="topMargin">
+       <number>0</number>
+      </property>
+      <property name="bottomMargin">
+       <number>0</number>
+      </property>
+      <item>
+       <layout class="QHBoxLayout" name="radialModeLayout">
+        <item>
+         <widget class="QLabel" name="radial_mode_label">
+          <property name="text">
+           <string>Radial data:</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QRadioButton" name="radial_off_radio">
+          <property name="text">
+           <string>Off</string>
+          </property>
+          <property name="checked">
+           <bool>true</bool>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QRadioButton" name="radial_temp_radio">
+          <property name="text">
+           <string>Temperature</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QRadioButton" name="radial_util_radio">
+          <property name="text">
+           <string>Utilisation</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <spacer name="radialModeSpacer">
+          <property name="orientation">
+           <enum>Qt::Horizontal</enum>
+          </property>
+          <property name="sizeHint" stdset="0">
+           <size>
+            <width>40</width>
+            <height>20</height>
+           </size>
+          </property>
+         </spacer>
+        </item>
+       </layout>
+      </item>
+      <item>
+       <layout class="QHBoxLayout" name="moduleColorLayout">
+        <item>
+         <widget class="QLabel" name="module_color_label">
+          <property name="text">
+           <string>Module colours:</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="cpu_color_button">
+          <property name="toolTip">
+           <string>Colour of the CPU ring and readout</string>
+          </property>
+          <property name="text">
+           <string>CPU</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="gpu_color_button">
+          <property name="toolTip">
+           <string>Colour of the GPU ring and readout</string>
+          </property>
+          <property name="text">
+           <string>GPU</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="ram_color_button">
+          <property name="toolTip">
+           <string>Colour of the RAM ring and readout</string>
+          </property>
+          <property name="text">
+           <string>RAM</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <spacer name="moduleColorSpacer">
+          <property name="orientation">
+           <enum>Qt::Horizontal</enum>
+          </property>
+          <property name="sizeHint" stdset="0">
+           <size>
+            <width>40</width>
+            <height>20</height>
+           </size>
+          </property>
+         </spacer>
+        </item>
+       </layout>
+      </item>
+     </layout>
+    </widget>
    </item>
    <item>
-    <layout class="QHBoxLayout" name="moduleColorLayout">
-     <item>
-      <widget class="QLabel" name="module_color_label">
-       <property name="text">
-        <string>Module colours:</string>
-       </property>
-      </widget>
-     </item>
-     <item>
-      <widget class="QPushButton" name="cpu_color_button">
-       <property name="toolTip">
-        <string>Colour of the CPU ring and readout</string>
-       </property>
-       <property name="text">
-        <string>CPU</string>
-       </property>
-      </widget>
-     </item>
-     <item>
-      <widget class="QPushButton" name="gpu_color_button">
-       <property name="toolTip">
-        <string>Colour of the GPU ring and readout</string>
-       </property>
-       <property name="text">
-        <string>GPU</string>
-       </property>
-      </widget>
-     </item>
-     <item>
-      <widget class="QPushButton" name="ram_color_button">
-       <property name="toolTip">
-        <string>Colour of the RAM ring and readout</string>
-       </property>
-       <property name="text">
-        <string>RAM</string>
-       </property>
-      </widget>
-     </item>
-     <item>
-      <spacer name="moduleColorSpacer">
-       <property name="orientation">
-        <enum>Qt::Horizontal</enum>
-       </property>
-       <property name="sizeHint" stdset="0">
-        <size>
-         <width>40</width>
-         <height>20</height>
-        </size>
-       </property>
-      </spacer>
-     </item>
-    </layout>
+    <widget class="QWidget" name="music_visualiser_panel" native="true">
+     <property name="visible">
+      <bool>false</bool>
+     </property>
+     <layout class="QVBoxLayout" name="musicVisualiserPanelLayout">
+      <property name="leftMargin">
+       <number>0</number>
+      </property>
+      <property name="rightMargin">
+       <number>0</number>
+      </property>
+      <property name="topMargin">
+       <number>0</number>
+      </property>
+      <property name="bottomMargin">
+       <number>0</number>
+      </property>
+      <item>
+       <layout class="QHBoxLayout" name="musicTextColorLayout">
+        <item>
+         <widget class="QLabel" name="music_text_color_label">
+          <property name="text">
+           <string>Text colour:</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="music_text_color_button">
+          <property name="toolTip">
+           <string>Colour of the revolving song-details text. The border itself always matches the Background Color chosen above.</string>
+          </property>
+          <property name="text">
+           <string>Text</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <spacer name="musicTextColorSpacer">
+          <property name="orientation">
+           <enum>Qt::Horizontal</enum>
+          </property>
+          <property name="sizeHint" stdset="0">
+           <size>
+            <width>40</width>
+            <height>20</height>
+           </size>
+          </property>
+         </spacer>
+        </item>
+       </layout>
+      </item>
+      <item>
+       <layout class="QHBoxLayout" name="musicSizeLayout">
+        <item>
+         <widget class="QLabel" name="music_text_size_label">
+          <property name="text">
+           <string>Text size (px):</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QLineEdit" name="music_text_size_edit">
+          <property name="maximumSize">
+           <size>
+            <width>50</width>
+            <height>16777215</height>
+           </size>
+          </property>
+          <property name="toolTip">
+           <string>Font size of the revolving song-details text, in pixels (8-150)</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QLabel" name="music_outer_diameter_label">
+          <property name="text">
+           <string>Outer &#8960; %:</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QLineEdit" name="music_outer_diameter_edit">
+          <property name="maximumSize">
+           <size>
+            <width>50</width>
+            <height>16777215</height>
+           </size>
+          </property>
+          <property name="toolTip">
+           <string>Outer edge of the border band, as a percentage of the panel's size (10-100). The scrolling text is anchored to this.</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QLabel" name="music_inner_diameter_label">
+          <property name="text">
+           <string>Inner &#8960; %:</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QLineEdit" name="music_inner_diameter_edit">
+          <property name="maximumSize">
+           <size>
+            <width>50</width>
+            <height>16777215</height>
+           </size>
+          </property>
+          <property name="toolTip">
+           <string>Inner edge of the border band, as a percentage of the panel's size (0-99, must stay below Outer)</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <spacer name="musicSizeSpacer">
+          <property name="orientation">
+           <enum>Qt::Horizontal</enum>
+          </property>
+          <property name="sizeHint" stdset="0">
+           <size>
+            <width>40</width>
+            <height>20</height>
+           </size>
+          </property>
+         </spacer>
+        </item>
+       </layout>
+      </item>
+      <item>
+       <layout class="QHBoxLayout" name="musicDetailsLayout">
+        <item>
+         <widget class="QCheckBox" name="music_show_details_checkbox">
+          <property name="toolTip">
+           <string>Scroll song details nested within the border band</string>
+          </property>
+          <property name="text">
+           <string>Show song details</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QCheckBox" name="music_field_title_checkbox">
+          <property name="text">
+           <string>Title</string>
+          </property>
+          <property name="checked">
+           <bool>true</bool>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QCheckBox" name="music_field_artist_checkbox">
+          <property name="text">
+           <string>Artist</string>
+          </property>
+          <property name="checked">
+           <bool>true</bool>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QCheckBox" name="music_field_album_checkbox">
+          <property name="text">
+           <string>Album</string>
+          </property>
+          <property name="checked">
+           <bool>true</bool>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <spacer name="musicDetailsSpacer">
+          <property name="orientation">
+           <enum>Qt::Horizontal</enum>
+          </property>
+          <property name="sizeHint" stdset="0">
+           <size>
+            <width>40</width>
+            <height>20</height>
+           </size>
+          </property>
+         </spacer>
+        </item>
+       </layout>
+      </item>
+      <item>
+       <widget class="QLabel" name="music_now_playing_label">
+        <property name="text">
+         <string>jellyfin-tui not running</string>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
    </item>
    <item>
     <widget class="QCheckBox" name="debug_frame_index_checkbox">

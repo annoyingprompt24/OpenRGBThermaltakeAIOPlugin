@@ -65,12 +65,21 @@ void OpenRGBThermaltakeAIOPlugin::OnProfileAboutToLoad()
 {
 }
 
-void OpenRGBThermaltakeAIOPlugin::OnProfileLoad(nlohmann::json /*profile_data*/)
+void OpenRGBThermaltakeAIOPlugin::OnProfileLoad(nlohmann::json profile_data)
 {
+    if(ui != nullptr)
+    {
+        ui->LoadProfileData(profile_data);
+    }
 }
 
 nlohmann::json OpenRGBThermaltakeAIOPlugin::OnProfileSave()
 {
+    if(ui != nullptr)
+    {
+        return(ui->SaveProfileData());
+    }
+
     return(nlohmann::json());
 }
 

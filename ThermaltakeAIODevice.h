@@ -40,6 +40,7 @@
 #include <QPointF>
 #include <QColor>
 #include <QString>
+#include <QStringList>
 #include "ThermaltakeAIOSensors.h"
 
 struct hid_device_;
@@ -69,6 +70,20 @@ public:
         Off         = 0,
         Temperature = 1,
         Utilization = 2,
+    };
+
+    /*-----------------------------------------------------*\
+    | Which top-level visualisation is active. RadialGauge    |
+    | draws whatever OverlayMode selects on top of the         |
+    | streamed image/GIF; MusicVisualiser instead draws a       |
+    | circular border (and optional revolving song-details       |
+    | text) on top of the currently-set image, which the tab      |
+    | keeps in sync with jellyfin-tui's now-playing album art.      |
+    \*-----------------------------------------------------*/
+    enum class VisualisationMode
+    {
+        RadialGauge     = 0,
+        MusicVisualiser = 1,
     };
 
     /*-----------------------------------------------------*\
@@ -107,6 +122,44 @@ public:
     | the UI thread while the send loop is running.           |
     \*-----------------------------------------------------*/
     void                SetModuleColors(const QColor& cpu, const QColor& gpu, const QColor& ram);
+
+    /*-----------------------------------------------------*\
+    | Which top-level visualisation RunLoop draws on top of   |
+    | the current image(s) -- see VisualisationMode above.     |
+    \*-----------------------------------------------------*/
+    void                SetVisualisationMode(VisualisationMode mode);
+
+    /*-----------------------------------------------------*\
+    | Music Visualiser panel: the border is a filled band      |
+    | (not just a thin outline) that the song-details text       |
+    | scrolls nested inside, for legibility -- its fill always     |
+    | matches whatever background_color the tab uses for image      |
+    | compositing (kept in sync via SetMusicBackgroundColor()),       |
+    | so the band matches the rest of the theme rather than being      |
+    | a separately-picked accent colour. SetMusicTextColor() is         |
+    | the only independently user-chosen colour here, for the            |
+    | text drawn on top of that band. Fields to cycle through are          |
+    | recomputed by the tab from jellyfin-tui's now-playing metadata        |
+    | and which fields are checked; only one is shown at a time, one         |
+    | full revolution each, then RunLoop advances to the next.                \*-----------------------------------------------------*/
+    void                SetMusicBackgroundColor(const QColor& color);
+    void                SetMusicTextColor(const QColor& color);
+    void                SetMusicShowDetails(bool enabled);
+    void                SetMusicScrollFields(const QStringList& fields);
+
+    /*-----------------------------------------------------*\
+    | Music Visualiser sizing, all user-adjustable via the UI  |
+    | with min/max validation on that side. Outer/inner         |
+    | diameter are percentages of the panel's own size (min      |
+    | of width/height) -- e.g. 94 means the band's outer edge      |
+    | sits at 94% of the way to the panel edge. Text size is a       |
+    | plain pixel font size. The scrolling text's radius always       |
+    | tracks the OUTER diameter (not the band's midpoint), so         |
+    | changing the inner diameter only resizes the band's inner        |
+    | edge/thickness without moving the text.                            \*-----------------------------------------------------*/
+    void                SetMusicOuterDiameterPercent(int percent);
+    void                SetMusicInnerDiameterPercent(int percent);
+    void                SetMusicTextSizePx(int pixels);
 
     /*-----------------------------------------------------*\
     | Debug aid: draws "Frame i/N" on every sent frame, for   |
@@ -182,6 +235,15 @@ private:
                                   float value, float min_val, float max_val, const QColor& color);
 
     /*-----------------------------------------------------*\
+    | Draws the Music Visualiser's circular border and, if   |
+    | enabled, the revolving song-details text inside it.     |
+    | RunLoop-thread-only (advances music_scroll_phase), no    |
+    | mutex needed beyond the one guarding music_scroll_text    |
+    | itself, which this only reads for the instant it copies.   |
+    \*-----------------------------------------------------*/
+    void                DrawMusicVisualiser(QImage* image);
+
+    /*-----------------------------------------------------*\
     | Sends the one-way, unreplied report seen on interface  |
     | 0 (EP1 OUT, report ID 0x12, 440 bytes: 12 01 00 80 64  |
     | then zero-padded) in a real TT RGB PLUS capture. It      |
@@ -199,9 +261,28 @@ private:
     hid_device*         device_iface0;
     QThread*            worker_thread;
     std::atomic<bool>   streaming;
-    std::atomic<OverlayMode> overlay_mode;
+    std::atomic<OverlayMode>       overlay_mode;
+    std::atomic<VisualisationMode> visualisation_mode;
     std::atomic<bool>   debug_frame_index_enabled;
     std::atomic<int>    brightness;
+
+    /*-----------------------------------------------------*\
+    | Music Visualiser state. music_scroll_text is set from   |
+    | the UI thread (recomputed whenever jellyfin-tui's now-   |
+    | playing metadata or the selected fields change) and is    |
+    | read every frame by RunLoop, hence the mutex -- unlike     |
+    | the per-module colours above, a QStringList isn't a fixed-  |
+    | width POD so it can't just be an std::atomic. Only one       |
+    | field is shown at a time; music_scroll_field_index picks       |
+    | which. music_scroll_phase and music_scroll_field_index are      |
+    | both RunLoop-thread-only (like smoothed_cpu et al) -- phase       |
+    | advances a little every frame to animate the revolve, and          |
+    | field_index advances by one each time phase completes a wrap.       |
+    \*-----------------------------------------------------*/
+    QMutex              music_scroll_text_mutex;
+    QStringList         music_scroll_fields;
+    float               music_scroll_phase = 0.0f;
+    int                 music_scroll_field_index = 0;
 
     /*-----------------------------------------------------*\
     | Per-module colours as packed QRgb so they can be read  |
@@ -211,6 +292,12 @@ private:
     std::atomic<QRgb>   module_color_cpu;
     std::atomic<QRgb>   module_color_gpu;
     std::atomic<QRgb>   module_color_ram;
+    std::atomic<QRgb>   music_background_color;
+    std::atomic<QRgb>   music_text_color;
+    std::atomic<bool>   music_show_details;
+    std::atomic<int>    music_outer_diameter_pct;
+    std::atomic<int>    music_inner_diameter_pct;
+    std::atomic<int>    music_text_size_px;
 
     QMutex              images_mutex;
     QVector<QImage>     images;

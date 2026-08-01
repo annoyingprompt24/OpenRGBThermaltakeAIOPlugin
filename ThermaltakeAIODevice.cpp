@@ -22,6 +22,7 @@
 #include <QPainter>
 #include <QFont>
 #include <QFontMetrics>
+#include <QFontMetricsF>
 #include <QBuffer>
 #include <QtMath>
 
@@ -47,11 +48,18 @@ ThermaltakeAIODevice::ThermaltakeAIODevice()
     , worker_thread(nullptr)
     , streaming(false)
     , overlay_mode(OverlayMode::Off)
+    , visualisation_mode(VisualisationMode::RadialGauge)
     , debug_frame_index_enabled(false)
     , brightness(100)
     , module_color_cpu(qRgb(255, 99, 71))
     , module_color_gpu(qRgb(94, 214, 108))
     , module_color_ram(qRgb(84, 170, 255))
+    , music_background_color(qRgb(0, 0, 0))
+    , music_text_color(qRgb(94, 214, 108))
+    , music_show_details(true)
+    , music_outer_diameter_pct(94)
+    , music_inner_diameter_pct(62)
+    , music_text_size_px(46)
     , images_version(0)
     , render_version(0)
     , smoothed_cpu(0.0f)
@@ -392,6 +400,55 @@ void ThermaltakeAIODevice::SetModuleColors(const QColor& cpu, const QColor& gpu,
     render_version++;
 }
 
+void ThermaltakeAIODevice::SetVisualisationMode(VisualisationMode mode)
+{
+    visualisation_mode    = mode;
+    smoothing_initialized = false;
+    render_version++;
+}
+
+void ThermaltakeAIODevice::SetMusicBackgroundColor(const QColor& color)
+{
+    music_background_color = color.rgb();
+    render_version++;
+}
+
+void ThermaltakeAIODevice::SetMusicTextColor(const QColor& color)
+{
+    music_text_color = color.rgb();
+    render_version++;
+}
+
+void ThermaltakeAIODevice::SetMusicShowDetails(bool enabled)
+{
+    music_show_details = enabled;
+    render_version++;
+}
+
+void ThermaltakeAIODevice::SetMusicScrollFields(const QStringList& fields)
+{
+    QMutexLocker locker(&music_scroll_text_mutex);
+    music_scroll_fields = fields;
+}
+
+void ThermaltakeAIODevice::SetMusicOuterDiameterPercent(int percent)
+{
+    music_outer_diameter_pct = percent;
+    render_version++;
+}
+
+void ThermaltakeAIODevice::SetMusicInnerDiameterPercent(int percent)
+{
+    music_inner_diameter_pct = percent;
+    render_version++;
+}
+
+void ThermaltakeAIODevice::SetMusicTextSizePx(int pixels)
+{
+    music_text_size_px = pixels;
+    render_version++;
+}
+
 void ThermaltakeAIODevice::SetDebugFrameIndexEnabled(bool enabled)
 {
     debug_frame_index_enabled = enabled;
@@ -534,6 +591,133 @@ void ThermaltakeAIODevice::DrawOverlay(QImage* image, const ThermaltakeAIOSensor
         painter.setPen(rings[i].color);
         QString text = QString("%1  %2%3").arg(rings[i].label).arg(rings[i].value, 0, 'f', 0).arg(suffix);
         painter.drawText(line_rect, Qt::AlignCenter, text);
+    }
+}
+
+void ThermaltakeAIODevice::DrawMusicVisualiser(QImage* image)
+{
+    QColor background_color = QColor::fromRgb(music_background_color.load());
+    QColor text_color       = QColor::fromRgb(music_text_color.load());
+
+    QPainter painter(image);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setRenderHint(QPainter::TextAntialiasing);
+
+    /*-----------------------------------------------------------------------*\
+    | The border is a wide filled band (not a thin outline) that the song-    |
+    | details text sits nested inside, for legibility -- text floating       |
+    | directly over the album art was hard to read. The band's fill always   |
+    | matches background_color (the same colour the tab uses to composite    |
+    | transparent image pixels), so it stays consistent with the theme       |
+    | rather than being its own separately-picked accent. Outer/inner         |
+    | diameter are both user-adjustable (percent of the panel's own size),    |
+    | drawn as a thick QPen stroke along a circle -- Qt centers a stroke on   |
+    | its path, so the path radius is the midpoint between the band's         |
+    | inner and outer edges. The tab clamps these to sane ranges before       |
+    | ever calling the setters, but clamp again here defensively in case      |
+    | inner ends up >= outer (e.g. transient values while the user is         |
+    | still typing) -- an inverted/zero-thickness band would otherwise        |
+    | draw nothing or something visually broken.                              |
+    \*-----------------------------------------------------------------------*/
+    QPointF center(image->width() / 2.0f, image->height() / 2.0f);
+    float   panel_radius = qMin(image->width(), image->height()) / 2.0f;
+    float   outer_radius = panel_radius * (music_outer_diameter_pct.load() / 100.0f);
+    float   inner_radius = panel_radius * (music_inner_diameter_pct.load() / 100.0f);
+    inner_radius = qBound(0.0f, inner_radius, outer_radius - 1.0f);
+
+    float band_thickness     = outer_radius - inner_radius;
+    float band_center_radius = (outer_radius + inner_radius) / 2.0f;
+
+    QPen band_pen(background_color, band_thickness, Qt::SolidLine, Qt::FlatCap);
+    painter.setPen(band_pen);
+    painter.setBrush(Qt::NoBrush);
+    painter.drawEllipse(center, band_center_radius, band_center_radius);
+
+    if(!music_show_details.load())
+    {
+        return;
+    }
+
+    QStringList fields;
+    {
+        QMutexLocker locker(&music_scroll_text_mutex);
+        fields = music_scroll_fields;
+    }
+
+    if(fields.isEmpty())
+    {
+        return;
+    }
+
+    /*-----------------------------------------------------------------------*\
+    | Only one field is shown at a time -- the full combined "Title / Artist  |
+    | / Album" string was too small and cramped to read on a 480px round      |
+    | panel. It revolves once around the band, then RunLoop's wrap below      |
+    | advances music_scroll_field_index to the next one. Each glyph is        |
+    | placed at its own angle around the circle and rotated to sit tangent    |
+    | to it (readable following the direction of travel), the standard        |
+    | "text on a circular path" trick; extra_spacing widens the gap between   |
+    | glyphs beyond their normal straight-line advance, which otherwise       |
+    | looks bunched up when wrapped around a curve.                           |
+    \*-----------------------------------------------------------------------*/
+    QString text        = fields[music_scroll_field_index % fields.size()];
+    int     text_size_px = music_text_size_px.load();
+
+    /*-----------------------------------------------------------------------*\
+    | Anchored to the OUTER diameter specifically (not the band's midpoint) -- |
+    | so dragging the inner diameter only changes the band's thickness/inner   |
+    | edge without also shifting where the text sits. The inset by roughly     |
+    | half the text size keeps glyphs centered within the band rather than    |
+    | overhanging its outer edge.                                             |
+    \*-----------------------------------------------------------------------*/
+    float text_radius   = outer_radius - text_size_px * 0.55f;
+    float extra_spacing = 1.89f;
+
+    QFont font = painter.font();
+    font.setPixelSize(text_size_px);
+    font.setBold(true);
+    painter.setFont(font);
+    QFontMetricsF metrics(font);
+
+    painter.setPen(text_color);
+
+    /*-----------------------------------------------------------------------*\
+    | Each glyph is rotated 180 deg past its position angle (not 90) so its   |
+    | own "up"/ascender direction points radially INWARD, toward the panel's  |
+    | center, at every point around the loop -- a single consistent rule      |
+    | with no discontinuity, which is what actually fixes bottom-of-circle    |
+    | text otherwise reading upside-down (the old +90 instead oriented each   |
+    | glyph's reading direction radially, making individual letters sit       |
+    | sideways rather than following the curve -- "reads vertically"). This   |
+    | inward-facing convention reverses which way, around the circle, is      |
+    | "forward" for left-to-right reading, so characters are laid out with    |
+    | DEcreasing angle here (subtracting advance_deg) to compensate --        |
+    | without this the letters would still be individually right-side-up     |
+    | but appear in reverse order along the path.                            |
+    \*-----------------------------------------------------------------------*/
+    float angle_deg = music_scroll_phase;
+    for(const QChar& ch : text)
+    {
+        QString glyph(ch);
+        float   advance_px  = metrics.horizontalAdvance(glyph) * extra_spacing;
+        float   advance_deg = qRadiansToDegrees(advance_px / text_radius);
+
+        painter.save();
+        painter.translate(center);
+        painter.rotate(angle_deg);
+        painter.translate(0.0, -text_radius);
+        painter.rotate(180.0);
+        painter.drawText(QPointF(-advance_px / 2.0f, metrics.ascent() / 2.5f), glyph);
+        painter.restore();
+
+        angle_deg -= advance_deg;
+    }
+
+    music_scroll_phase -= 0.6f;
+    if(music_scroll_phase <= -360.0f)
+    {
+        music_scroll_phase += 360.0f;
+        music_scroll_field_index = (music_scroll_field_index + 1) % fields.size();
     }
 }
 
@@ -728,8 +912,14 @@ void ThermaltakeAIODevice::RunLoop()
             continue;
         }
 
-        OverlayMode current_overlay_mode = overlay_mode.load();
-        if(current_overlay_mode != OverlayMode::Off)
+        VisualisationMode current_visualisation_mode = visualisation_mode.load();
+        OverlayMode       current_overlay_mode        = overlay_mode.load();
+        bool               drawing_radial_gauge = (current_visualisation_mode == VisualisationMode::RadialGauge) &&
+                                                    (current_overlay_mode != OverlayMode::Off);
+        bool               drawing_music_details = (current_visualisation_mode == VisualisationMode::MusicVisualiser) &&
+                                                     music_show_details.load();
+
+        if(drawing_radial_gauge)
         {
             if(cycle_start - cached_readings_time >= std::chrono::milliseconds(SENSOR_REFRESH_INTERVAL_MS))
             {
@@ -745,6 +935,11 @@ void ThermaltakeAIODevice::RunLoop()
             \*-----------------------------------------------------*/
             render_version++;
         }
+        else if(drawing_music_details)
+        {
+            /* Same reasoning as above: the scroll phase advances every cycle, so every cycle needs a fresh render. */
+            render_version++;
+        }
 
         size_t idx = frame_index % local_images.size();
         frame_index++;
@@ -753,9 +948,13 @@ void ThermaltakeAIODevice::RunLoop()
         if(encoded_cache_version[idx] != current_render_version)
         {
             QImage image = local_images[idx];
-            if(current_overlay_mode != OverlayMode::Off)
+            if(drawing_radial_gauge)
             {
                 DrawOverlay(&image, cached_readings, current_overlay_mode);
+            }
+            else if(current_visualisation_mode == VisualisationMode::MusicVisualiser)
+            {
+                DrawMusicVisualiser(&image);
             }
             if(debug_frame_index_enabled.load())
             {

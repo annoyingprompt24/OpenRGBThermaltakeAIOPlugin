@@ -2,7 +2,7 @@
 # OpenRGB Thermaltake AIO LCD Plugin QMake Project                                               #
 #-----------------------------------------------------------------------------------------------#
 
-QT += core gui widgets
+QT += core gui widgets dbus
 
 if(greaterThan(QT_MAJOR_VERSION, 5)) {
 QT += core5compat
@@ -70,6 +70,7 @@ INCLUDEPATH +=                                                                  
 HEADERS +=                                                                                       \
     OpenRGBThermaltakeAIOPlugin.h                                                                \
     ThermaltakeAIODevice.h                                                                       \
+    ThermaltakeAIOMprisWatcher.h                                                                 \
     ThermaltakeAIOSensors.h                                                                      \
     ThermaltakeAIOTab.h                                                                          \
 
@@ -77,6 +78,7 @@ SOURCES +=                                                                      
     OpenRGBThermaltakeAIOPlugin.cpp                                                              \
     ThermaltakeAIOSensors.cpp                                                                    \
     ThermaltakeAIODevice.cpp                                                                     \
+    ThermaltakeAIOMprisWatcher.cpp                                                               \
     ThermaltakeAIOTab.cpp                                                                        \
 
 FORMS +=                                                                                         \
