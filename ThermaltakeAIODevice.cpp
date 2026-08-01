@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <cmath>
 #include <cstring>
+#include <cstdint>
 #include <algorithm>
 #ifdef __linux__
 #include <pthread.h>
@@ -47,6 +48,7 @@ ThermaltakeAIODevice::ThermaltakeAIODevice()
     , streaming(false)
     , overlay_mode(OverlayMode::Off)
     , debug_frame_index_enabled(false)
+    , brightness(100)
     , module_color_cpu(qRgb(255, 99, 71))
     , module_color_gpu(qRgb(94, 214, 108))
     , module_color_ram(qRgb(84, 170, 255))
@@ -58,7 +60,31 @@ ThermaltakeAIODevice::ThermaltakeAIODevice()
     , smoothing_initialized(false)
     , inter_chunk_delay_us(1000)
     , refresh_interval_ms(50)
-    , ack_pace(false)
+    /*-----------------------------------------------------------*\
+    | Default ON: the Windows TT RGB PLUS capture waits for the   |
+    | panel's EP4 ack before every next frame in every mode, and  |
+    | the devsstuff writeup says draining EP4 is mandatory (the   |
+    | device locks up otherwise). Combined with the refresh-      |
+    | interval pacing below this reproduces the vendor cadence    |
+    | (~6ms decode ack + ~40ms slack ~= 20fps) and measurably     |
+    | reduced tearing on hardware. Set THERMALTAKE_AIO_ACK_PACE=0 |
+    | to force the old fire-immediately behavior for comparison.  |
+    \*-----------------------------------------------------------*/
+    , ack_pace(true)
+    /*-----------------------------------------------------------*\
+    | Default ON: transmit the SOI/flagged chunk FIRST (natural   |
+    | front-to-back order) rather than last. The chunk headers are|
+    | byte-identical either way (SOI chunk keeps idx=N/flag=0x80);|
+    | only the wire order changes. Sending SOI last makes the     |
+    | panel's decoder emit the top image rows in a burst right    |
+    | after the final packet, racing its scan-out at row 0 and    |
+    | tearing the top of the frame; delivering SOI first removes  |
+    | that race. Confirmed on hardware to ELIMINATE the tearing   |
+    | (geometric band probe + real nyan.gif) where every prior    |
+    | lever only reduced it. Set THERMALTAKE_AIO_SOI_LAST=1 to     |
+    | restore the old SOI-last order for comparison.              |
+    \*-----------------------------------------------------------*/
+    , soi_first(true)
 {
     /* Force an immediate sensor read on the first overlay-enabled frame. */
     cached_readings_time = std::chrono::steady_clock::now() - std::chrono::hours(1);
@@ -75,9 +101,14 @@ ThermaltakeAIODevice::ThermaltakeAIODevice()
     {
         ack_pace = (std::atoi(env_ack) != 0);
     }
+    if(const char* env_soi = std::getenv("THERMALTAKE_AIO_SOI_LAST"))
+    {
+        soi_first = (std::atoi(env_soi) == 0);
+    }
 
-    std::fprintf(stderr, "[ThermaltakeAIOPlugin] chunk delay = %dus, refresh interval = %dms, ack_pace = %s\n",
-                 inter_chunk_delay_us, refresh_interval_ms.load(), ack_pace ? "on" : "off");
+    std::fprintf(stderr, "[ThermaltakeAIOPlugin] chunk delay = %dus, refresh interval = %dms, ack_pace = %s, soi = %s\n",
+                 inter_chunk_delay_us, refresh_interval_ms.load(), ack_pace ? "on" : "off",
+                 soi_first ? "first" : "last");
 }
 
 ThermaltakeAIODevice::~ThermaltakeAIODevice()
@@ -147,15 +178,181 @@ void ThermaltakeAIODevice::SendResyncCommand()
         return;
     }
 
+    /*-----------------------------------------------------*\
+    | Byte 4 is the panel brightness (0x00-0x64), not a      |
+    | constant -- the Windows capture only ever showed 0x64   |
+    | because the panel was at 100%. Send the current value    |
+    | so a resync (fired on Start / content change) doesn't     |
+    | silently reset brightness back to 100%.                    |
+    \*-----------------------------------------------------*/
     unsigned char report[440] = { 0 };
     report[0] = 0x12;
     report[1] = 0x01;
     report[2] = 0x00;
     report[3] = 0x80;
-    report[4] = 0x64;
+    report[4] = (unsigned char)brightness.load();
 
     int result = hid_write(device_iface0, report, sizeof(report));
-    std::fprintf(stderr, "[ThermaltakeAIOPlugin] sent interface-0 resync command (0x12), result=%d\n", result);
+    std::fprintf(stderr, "[ThermaltakeAIOPlugin] sent interface-0 resync command (0x12), brightness=%d, result=%d\n",
+                 brightness.load(), result);
+}
+
+void ThermaltakeAIODevice::SetBrightness(int percent)
+{
+    if(percent < 0)   percent = 0;
+    if(percent > 100) percent = 100;
+    brightness = percent;
+
+    if(device_iface0 == nullptr)
+    {
+        /* Not connected yet -- the value is stored and will be applied by the next resync on connect/start. */
+        return;
+    }
+
+    /*-----------------------------------------------------*\
+    | Brightness is the same 0x12 interface-0 report as the  |
+    | resync, just with the live value in byte 4. Sending it  |
+    | directly here applies it immediately without waiting     |
+    | for a stream Start or content change.                     |
+    \*-----------------------------------------------------*/
+    unsigned char report[440] = { 0 };
+    report[0] = 0x12;
+    report[1] = 0x01;
+    report[2] = 0x00;
+    report[3] = 0x80;
+    report[4] = (unsigned char)percent;
+
+    int result = hid_write(device_iface0, report, sizeof(report));
+    std::fprintf(stderr, "[ThermaltakeAIOPlugin] set brightness=%d, result=%d\n", percent, result);
+}
+
+int ThermaltakeAIODevice::GetBrightness() const
+{
+    return(brightness.load());
+}
+
+/*---------------------------------------------------------------------------*\
+| Flash-write protocol (interface 0, reports 0x0a + 0x0b), reverse-engineered  |
+| from a Windows USBPcap capture of TT RGB PLUS and validated byte-for-byte:   |
+| a Python port of exactly this logic reproduced all 88 captured packets of    |
+| the real Standby write with zero mismatches.                                 |
+|                                                                              |
+|   1. 0x0a announce (440B): 0a 01 00 80 <flag u32-LE> <total_size u32-LE>.    |
+|      flag = 0 for a static image, 1 for an animation blob.                   |
+|   2. 0x0b data, in batches of 10240 payload bytes (last batch = remainder).  |
+|      Each batch is [12-byte batch header][payload], chunked into 436-byte    |
+|      pieces across 440-byte packets (4-byte report header + 436 payload).    |
+|      The batch header is three u32-LE: running byte offset (before this      |
+|      batch), this batch's payload size, and a 0-100 progress percentage.     |
+|      The FIRST chunk of each batch carries flag=0x80 and, in its idx byte,   |
+|      the batch's total chunk count; the rest are idx 1,2,... with flag 0.    |
+|      The final chunk of a batch is zero-padded to 436.                       |
+|   3. The device echoes 0x0a on EP2 and returns a per-batch progress ACK on   |
+|      EP2; the vendor always waits for that before proceeding, so we drain    |
+|      the interface-0 IN endpoint after the announce and after each batch.    |
+\*---------------------------------------------------------------------------*/
+bool ThermaltakeAIODevice::FlashBlob(const QByteArray& data, bool is_animation)
+{
+    if(device_iface0 == nullptr)
+    {
+        std::fprintf(stderr, "[ThermaltakeAIOPlugin] FlashBlob: interface 0 not open\n");
+        return(false);
+    }
+
+    const int      PKT     = 440;
+    const int      PAYLOAD = PKT - 4;   /* 436 real bytes after the 4-byte report header */
+    const int      BATCH   = 10240;     /* payload bytes per full batch */
+    const uint32_t total   = (uint32_t)data.size();
+
+    if(total == 0)
+    {
+        return(false);
+    }
+
+    auto put_u32 = [](unsigned char* p, uint32_t v)
+    {
+        p[0] = (unsigned char)(v & 0xff);
+        p[1] = (unsigned char)((v >> 8)  & 0xff);
+        p[2] = (unsigned char)((v >> 16) & 0xff);
+        p[3] = (unsigned char)((v >> 24) & 0xff);
+    };
+
+    unsigned char ack[PKT];
+
+    /*-----------------------------------------------------------------------*\
+    | Step 1: 0x0a announce.                                                  |
+    \*-----------------------------------------------------------------------*/
+    unsigned char announce[PKT] = { 0 };
+    announce[0] = 0x0a;
+    announce[1] = 0x01;
+    announce[2] = 0x00;
+    announce[3] = 0x80;
+    put_u32(&announce[4], is_animation ? 1u : 0u);
+    put_u32(&announce[8], total);
+    if(hid_write(device_iface0, announce, PKT) < 0)
+    {
+        std::fprintf(stderr, "[ThermaltakeAIOPlugin] FlashBlob: 0x0a announce write failed\n");
+        return(false);
+    }
+    hid_read_timeout(device_iface0, ack, sizeof(ack), ACK_TIMEOUT_MS);
+
+    /*-----------------------------------------------------------------------*\
+    | Step 2: 0x0b batches.                                                   |
+    \*-----------------------------------------------------------------------*/
+    uint32_t offset = 0;
+    while(offset < total)
+    {
+        uint32_t bsize = (total - offset < (uint32_t)BATCH) ? (total - offset) : (uint32_t)BATCH;
+        uint32_t pct   = (uint32_t)(((uint64_t)(offset + bsize) * 100) / total);
+
+        /* Batch stream = 12-byte batch header + this batch's payload bytes. */
+        QByteArray stream;
+        unsigned char bhdr[12];
+        put_u32(&bhdr[0], offset);
+        put_u32(&bhdr[4], bsize);
+        put_u32(&bhdr[8], pct);
+        stream.append(reinterpret_cast<const char*>(bhdr), 12);
+        stream.append(data.constData() + offset, (int)bsize);
+
+        int nchunks = (stream.size() + PAYLOAD - 1) / PAYLOAD;
+        for(int j = 0; j < nchunks; j++)
+        {
+            unsigned char pkt[PKT] = { 0 };
+            pkt[0] = 0x0b;
+            pkt[1] = (unsigned char)((j == 0) ? (nchunks & 0xff) : (j & 0xff));
+            pkt[2] = 0x00;
+            pkt[3] = (unsigned char)((j == 0) ? 0x80 : 0x00);
+
+            int start = j * PAYLOAD;
+            int len   = stream.size() - start;
+            if(len > PAYLOAD) len = PAYLOAD;
+            std::memcpy(pkt + 4, stream.constData() + start, len);   /* remainder stays zero-padded */
+
+            if(hid_write(device_iface0, pkt, PKT) < 0)
+            {
+                std::fprintf(stderr, "[ThermaltakeAIOPlugin] FlashBlob: 0x0b chunk write failed at offset %u\n", offset);
+                return(false);
+            }
+        }
+
+        /* Wait for the device's per-batch progress ACK before the next batch. */
+        hid_read_timeout(device_iface0, ack, sizeof(ack), ACK_TIMEOUT_MS);
+        offset += bsize;
+    }
+
+    std::fprintf(stderr, "[ThermaltakeAIOPlugin] FlashBlob: wrote %u bytes (animation=%d)\n", total, is_animation ? 1 : 0);
+    return(true);
+}
+
+bool ThermaltakeAIODevice::SetStandbyImage(const QImage& image)
+{
+    QImage frame = image;
+    if(frame.width() != PANEL_SIZE || frame.height() != PANEL_SIZE)
+    {
+        frame = frame.scaled(PANEL_SIZE, PANEL_SIZE, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    }
+    QByteArray jpeg = EncodeJpeg(frame, 90);
+    return(FlashBlob(jpeg, false));
 }
 
 bool ThermaltakeAIODevice::IsConnected() const
@@ -340,15 +537,21 @@ void ThermaltakeAIODevice::DrawOverlay(QImage* image, const ThermaltakeAIOSensor
     }
 }
 
-QVector<QByteArray> ThermaltakeAIODevice::ChunkFrame(const QByteArray& jpeg_bytes)
+QVector<QByteArray> ThermaltakeAIODevice::ChunkFrame(const QByteArray& jpeg_bytes, bool soi_first)
 {
     /*-----------------------------------------------------------------------*\
     | Split the JPEG into normal front-to-back content chunks (content chunk  |
-    | 1 = SOI..., content chunk N = ...EOI), then reorder for the wire as     |
-    | [chunk2, chunk3, ..., chunkN, chunk1] with header idx = 1..N-1, N and   |
-    | flag 0x80 only on the last-sent (SOI) chunk. Verified byte-for-byte     |
-    | against a real capture -- see project notes, this ordering is          |
-    | intentional and not a bug despite looking backwards.                    |
+    | 0 = SOI..., content chunk N-1 = ...EOI). Every chunk gets the SAME      |
+    | header regardless of wire order: content chunk 0 (SOI) -> idx = N,      |
+    | flag = 0x80 ; content chunk k>=1 -> idx = k, flag = 0x00.               |
+    |                                                                         |
+    | Only the WIRE ORDER differs:                                            |
+    |   soi_first == false : [chunk1, chunk2, ..., chunkN-1, chunk0(SOI)]     |
+    |     -- the original, capture-verified SOI-last order.                   |
+    |   soi_first == true  : [chunk0(SOI), chunk1, ..., chunkN-1]             |
+    |     -- natural order, SOI transmitted first. Confirmed on hardware to   |
+    |     eliminate the top-of-frame tearing (the SOI-last burst raced the    |
+    |     panel's scan-out at row 0); this is the default. See project notes. |
     \*-----------------------------------------------------------------------*/
     QVector<QByteArray> content_chunks;
     for(int offset = 0; offset < jpeg_bytes.size(); offset += CHUNK_PAYLOAD)
@@ -357,26 +560,42 @@ QVector<QByteArray> ThermaltakeAIODevice::ChunkFrame(const QByteArray& jpeg_byte
     }
 
     int n = content_chunks.size();
-    QVector<QByteArray> wire_chunks;
-    wire_chunks.reserve(n);
 
-    for(int pos = 1; pos <= n; pos++)
+    /*-----------------------------------------------------------------------*\
+    | Build each content chunk's packet with its fixed header, in content     |
+    | order (index 0..N-1), then lay them on the wire per soi_first.          |
+    \*-----------------------------------------------------------------------*/
+    QVector<QByteArray> by_content;
+    by_content.reserve(n);
+    for(int ci = 0; ci < n; ci++)
     {
-        /* pos 1..N-1 -> content chunks 2..N ; pos N -> content chunk 1 (SOI) */
-        const QByteArray& payload = (pos == n) ? content_chunks[0] : content_chunks[pos];
+        int  idx  = (ci == 0) ? n : ci;
+        char flag = (ci == 0) ? char(0x80) : char(0x00);
 
         QByteArray chunk;
         chunk.reserve(CHUNK_TOTAL);
         chunk.append(char(0x08));
-        chunk.append(char(pos & 0xFF));
+        chunk.append(char(idx & 0xFF));
         chunk.append(char(0x00));
-        chunk.append(char((pos == n) ? 0x80 : 0x00));
-        chunk.append(payload);
+        chunk.append(flag);
+        chunk.append(content_chunks[ci]);
         chunk.append(CHUNK_TOTAL - chunk.size(), char(0x00));
 
-        wire_chunks.push_back(chunk);
+        by_content.push_back(chunk);
     }
 
+    if(soi_first)
+    {
+        return(by_content);
+    }
+
+    QVector<QByteArray> wire_chunks;
+    wire_chunks.reserve(n);
+    for(int ci = 1; ci < n; ci++)
+    {
+        wire_chunks.push_back(by_content[ci]);
+    }
+    wire_chunks.push_back(by_content[0]);
     return(wire_chunks);
 }
 
@@ -564,7 +783,7 @@ void ThermaltakeAIODevice::RunLoop()
 
         const QByteArray& jpeg_bytes = encoded_cache[idx];
 
-        QVector<QByteArray> chunks = ChunkFrame(jpeg_bytes);
+        QVector<QByteArray> chunks = ChunkFrame(jpeg_bytes, soi_first);
         bool write_failed = false;
         int  chunk_pos    = 0;
         for(const QByteArray& chunk : chunks)
@@ -656,7 +875,19 @@ void ThermaltakeAIODevice::RunLoop()
             unsigned char ack_buf[16];
             hid_read_timeout(device, ack_buf, sizeof(ack_buf), ACK_TIMEOUT_MS);
         }
-        else
+
+        /*-------------------------------------------------------------*\
+        | Pace to the target frame interval regardless of ack_pace.     |
+        | The Windows USBPcap capture of TT RGB PLUS shows its own      |
+        | pacing is *both* "wait for the EP4 ack (~6ms decode)" *and*   |
+        | ~40ms of additional slack before the next frame's first       |
+        | chunk (~21fps). We had previously tested those two in         |
+        | isolation -- ack_pace on but firing the next frame            |
+        | immediately, and big fixed delays with no ack drain -- never  |
+        | together, which is the one combination the vendor actually    |
+        | uses. Draining the ack above then sleeping the remaining      |
+        | refresh interval here reproduces the vendor cadence exactly.  |
+        \*-------------------------------------------------------------*/
         {
             auto elapsed = std::chrono::steady_clock::now() - cycle_start;
             auto remaining = std::chrono::milliseconds(refresh_interval_ms) - elapsed;

@@ -79,6 +79,30 @@
     </layout>
    </item>
    <item>
+    <layout class="QHBoxLayout" name="persistentLayout">
+     <item>
+      <widget class="QPushButton" name="set_standby_button">
+       <property name="toolTip">
+        <string>Write a still image into the panel's onboard flash as the persistent Standby image (shown when the PC is off/asleep). Unlike streaming, this survives power-off. Takes ~1s.</string>
+       </property>
+       <property name="text">
+        <string>Set Standby Image...</string>
+       </property>
+       <property name="enabled">
+        <bool>false</bool>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QLabel" name="standby_status_label">
+       <property name="text">
+        <string/>
+       </property>
+      </widget>
+     </item>
+    </layout>
+   </item>
+   <item>
     <layout class="QHBoxLayout" name="visualisationLayout">
      <item>
       <widget class="QLabel" name="visualisation_label">
@@ -249,6 +273,39 @@
        </property>
        <property name="value">
         <number>20</number>
+       </property>
+      </widget>
+     </item>
+    </layout>
+   </item>
+   <item>
+    <layout class="QHBoxLayout" name="brightnessLayout">
+     <item>
+      <widget class="QLabel" name="brightness_slider_label">
+       <property name="text">
+        <string>Brightness: 100%</string>
+       </property>
+       <property name="minimumSize">
+        <size>
+         <width>110</width>
+         <height>0</height>
+        </size>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QSlider" name="brightness_slider">
+       <property name="orientation">
+        <enum>Qt::Horizontal</enum>
+       </property>
+       <property name="minimum">
+        <number>0</number>
+       </property>
+       <property name="maximum">
+        <number>100</number>
+       </property>
+       <property name="value">
+        <number>100</number>
        </property>
       </widget>
      </item>

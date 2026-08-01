@@ -133,9 +133,40 @@ public:
     void                SetTargetFps(int fps);
     int                 GetTargetFps() const;
 
+    /*-----------------------------------------------------*\
+    | Panel backlight brightness, 0-100 linear percent.      |
+    | Carried in byte 4 of the interface-0 0x12 report (the  |
+    | same report SendResyncCommand() sends) -- confirmed by  |
+    | a Windows USBPcap capture of the TT RGB PLUS slider:     |
+    | 0x00-0x64 maps linearly to 0-100%, applied immediately   |
+    | with no separate commit step. Takes effect whenever the   |
+    | device is connected, independent of streaming.             |
+    \*-----------------------------------------------------*/
+    void                SetBrightness(int percent);
+    int                 GetBrightness() const;
+
+    /*-----------------------------------------------------*\
+    | Persistent Standby image. Unlike the live "General"    |
+    | stream (interface 1, lost on power-off), this writes    |
+    | the JPEG into the panel's onboard flash over the         |
+    | interface-0 0x0a/0x0b flash-write protocol reverse-       |
+    | engineered from a Windows TT RGB PLUS capture and          |
+    | validated byte-exact against the vendor's own wire bytes.   |
+    | Blocking (~200ms for a typical JPEG); call off the UI       |
+    | thread if freezing matters. Returns false on write error.   |
+    \*-----------------------------------------------------*/
+    bool                SetStandbyImage(const QImage& image);
+
+    /*-----------------------------------------------------*\
+    | The shared flash-write primitive behind SetStandbyImage |
+    | (and, later, boot animation). is_animation sets the      |
+    | 0x0a announce flag field (0 = static, 1 = animation).     |
+    \*-----------------------------------------------------*/
+    bool                FlashBlob(const QByteArray& data, bool is_animation);
+
 private:
     void                RunLoop();
-    static QVector<QByteArray> ChunkFrame(const QByteArray& jpeg_bytes);
+    static QVector<QByteArray> ChunkFrame(const QByteArray& jpeg_bytes, bool soi_first);
 
     /*-----------------------------------------------------*\
     | Draws the CPU/GPU/RAM radial gauges. Not static -- it   |
@@ -170,6 +201,7 @@ private:
     std::atomic<bool>   streaming;
     std::atomic<OverlayMode> overlay_mode;
     std::atomic<bool>   debug_frame_index_enabled;
+    std::atomic<int>    brightness;
 
     /*-----------------------------------------------------*\
     | Per-module colours as packed QRgb so they can be read  |
@@ -241,4 +273,12 @@ private:
     int               inter_chunk_delay_us;
     std::atomic<int>  refresh_interval_ms;
     bool              ack_pace;
+
+    /*-----------------------------------------------------*\
+    | Transmit the SOI/flagged chunk first (default) vs the |
+    | original SOI-last order. SOI-first eliminates the top- |
+    | of-frame tearing on hardware. THERMALTAKE_AIO_SOI_LAST=1|
+    | restores SOI-last. See ChunkFrame().                  |
+    \*-----------------------------------------------------*/
+    bool              soi_first;
 };

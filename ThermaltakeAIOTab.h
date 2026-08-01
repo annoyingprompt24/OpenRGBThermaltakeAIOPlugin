@@ -27,6 +27,7 @@ public:
 private slots:
     void on_choose_image_button_clicked();
     void on_blank_canvas_button_clicked();
+    void on_set_standby_button_clicked();
     void on_background_color_button_clicked();
     void on_start_stop_button_clicked();
     void on_visualisation_combo_currentIndexChanged(int index);
@@ -38,6 +39,7 @@ private slots:
     void on_ram_color_button_clicked();
     void on_debug_frame_index_checkbox_toggled(bool checked);
     void on_fps_slider_valueChanged(int value);
+    void on_brightness_slider_valueChanged(int value);
     void RefreshConnectionStatus();
 
 private:

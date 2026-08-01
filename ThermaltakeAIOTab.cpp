@@ -42,6 +42,10 @@ ThermaltakeAIOTab::ThermaltakeAIOTab(QWidget* parent) :
     ui->fps_slider->setValue(initial_fps);
     ui->fps_slider_label->setText(QString("Target FPS: %1").arg(initial_fps));
 
+    int initial_brightness = device->GetBrightness();
+    ui->brightness_slider->setValue(initial_brightness);
+    ui->brightness_slider_label->setText(QString("Brightness: %1%").arg(initial_brightness));
+
     device->SetModuleColors(module_color_cpu, module_color_gpu, module_color_ram);
 
     UpdateBackgroundColorButtonSwatch();
@@ -76,11 +80,14 @@ void ThermaltakeAIOTab::RefreshConnectionStatus()
     {
         ui->connection_status_label->setText("Panel connected");
         ui->start_stop_button->setEnabled(has_streamable_content);
+        /* Standby is a self-contained flash write -- it picks its own image, so it only needs a connected panel. */
+        ui->set_standby_button->setEnabled(true);
     }
     else
     {
         ui->connection_status_label->setText("Panel not connected");
         ui->start_stop_button->setEnabled(false);
+        ui->set_standby_button->setEnabled(false);
     }
 }
 
@@ -112,6 +119,58 @@ void ThermaltakeAIOTab::on_blank_canvas_button_clicked()
     ui->preview_label->setPixmap(QPixmap::fromImage(blank).scaled(ui->preview_label->size(),
                                                                      Qt::KeepAspectRatio, Qt::SmoothTransformation));
     ui->start_stop_button->setEnabled(device->IsConnected());
+}
+
+void ThermaltakeAIOTab::on_set_standby_button_clicked()
+{
+    QString path = QFileDialog::getOpenFileName(this, "Choose Standby Image", QString(),
+                                                  "Images (*.png *.jpg *.jpeg *.bmp *.gif)");
+    if(path.isEmpty())
+    {
+        return;
+    }
+
+    /*-----------------------------------------------------*\
+    | Prepare the frame exactly like the live-stream path:  |
+    | composite onto the background color first (the panel   |
+    | is a plain JPEG raster with no transparency), then     |
+    | center-crop to square and scale to the panel size. For |
+    | an animated source we just take the first frame.       |
+    \*-----------------------------------------------------*/
+    QImageReader reader(path);
+    reader.setAutoTransform(true);
+    QImage image = reader.read();
+    if(image.isNull())
+    {
+        ui->standby_status_label->setText("Failed to load image");
+        return;
+    }
+
+    QImage composited(image.size(), QImage::Format_RGB32);
+    composited.fill(background_color);
+    QPainter painter(&composited);
+    painter.drawImage(0, 0, image);
+    painter.end();
+
+    int   side = qMin(composited.width(), composited.height());
+    QRect crop_rect((composited.width() - side) / 2, (composited.height() - side) / 2, side, side);
+    QImage square = composited.copy(crop_rect).scaled(ThermaltakeAIODevice::PANEL_SIZE, ThermaltakeAIODevice::PANEL_SIZE,
+                                                        Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+
+    /*-----------------------------------------------------*\
+    | The flash write blocks ~200ms. Show status and force   |
+    | an immediate repaint so the label updates before the    |
+    | UI thread stalls, then disable the button for the       |
+    | duration to prevent re-entrancy.                        |
+    \*-----------------------------------------------------*/
+    ui->set_standby_button->setEnabled(false);
+    ui->standby_status_label->setText("Writing standby image...");
+    ui->standby_status_label->repaint();
+
+    bool ok = device->SetStandbyImage(square);
+
+    ui->standby_status_label->setText(ok ? "Standby image saved to panel" : "Standby write failed");
+    ui->set_standby_button->setEnabled(device->IsConnected());
 }
 
 void ThermaltakeAIOTab::on_background_color_button_clicked()
@@ -301,6 +360,12 @@ void ThermaltakeAIOTab::on_fps_slider_valueChanged(int value)
 {
     device->SetTargetFps(value);
     ui->fps_slider_label->setText(QString("Target FPS: %1").arg(value));
+}
+
+void ThermaltakeAIOTab::on_brightness_slider_valueChanged(int value)
+{
+    device->SetBrightness(value);
+    ui->brightness_slider_label->setText(QString("Brightness: %1%").arg(value));
 }
 
 void ThermaltakeAIOTab::UpdateStartStopButtonLabel()
